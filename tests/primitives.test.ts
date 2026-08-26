@@ -181,6 +181,6 @@ test('a primitive is indistinguishable from any other body downstream', { skip }
   // knowledge of how either body originated.
   const second = await kernel.subtract(first.bodyId, tool);
   assert.equal(second.kind, 'body');
-  const mesh = await kernel.tessellateToCopy(primitive);
+  const mesh = await kernel.tessellate(primitive);
   assert.ok(mesh.meta.triangleCount > 0);
 });

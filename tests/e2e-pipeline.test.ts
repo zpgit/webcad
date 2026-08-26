@@ -34,20 +34,18 @@ test('create, subtract, tessellate, and hand off render buffers', { skip }, asyn
   assert.equal(outcome.kind, 'body');
   if (outcome.kind !== 'body') return;
 
-  // Stands in for the viewport: consumes the views inside the synchronous
-  // window, exactly as the GPU upload path does.
-  const uploaded = await kernel.withTessellation(
-    outcome.bodyId,
-    { linearDeflection: 0.1 },
-    (views, meta) => ({
-      positions: views.positions.length,
-      normals: views.normals.length,
-      indices: views.indices.length,
-      maxIndex: views.indices.reduce((max, i) => (i > max ? i : max), 0),
-      triangleCount: meta.triangleCount,
-      vertexCount: meta.vertexCount,
-    }),
-  );
+  // Stands in for the viewport, which adopts these buffers as they are.
+  const { mesh, meta } = await kernel.tessellate(outcome.bodyId, {
+    linearDeflection: 0.1,
+  });
+  const uploaded = {
+    positions: mesh.positions.length,
+    normals: mesh.normals.length,
+    indices: mesh.indices.length,
+    maxIndex: mesh.indices.reduce((max, i) => (i > max ? i : max), 0),
+    triangleCount: meta.triangleCount,
+    vertexCount: meta.vertexCount,
+  };
 
   assert.ok(uploaded.triangleCount > 0, 'the result must be renderable');
   assert.equal(uploaded.positions, uploaded.vertexCount * 3);
@@ -94,7 +92,7 @@ test('operation durations are measured against the frame budget', { skip }, asyn
   // Fine tessellation of a large curved body: the most expensive thing MVP-0
   // can ask for, and the likeliest place to exceed a frame.
   const cylinder = await kernel.createCylinder({ radius: 80, height: 160 });
-  await kernel.tessellateToCopy(cylinder, {
+  await kernel.tessellate(cylinder, {
     linearDeflection: 0.002,
     angularDeflection: 0.01,
   });

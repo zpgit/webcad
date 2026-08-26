@@ -15,7 +15,7 @@ test('tessellation produces well-formed buffers', { skip }, async () => {
   const kernel = await makeKernel();
   const box = await kernel.createBox({ width: 10, depth: 10, height: 10 });
 
-  const { mesh, meta } = await kernel.tessellateToCopy(box);
+  const { mesh, meta } = await kernel.tessellate(box);
 
   assert.ok(meta.triangleCount > 0);
   assert.ok(meta.vertexCount > 0);
@@ -45,7 +45,7 @@ test('tessellation produces well-formed buffers', { skip }, async () => {
 test('a curved surface becomes many triangles', { skip }, async () => {
   const kernel = await makeKernel();
   const cylinder = await kernel.createCylinder({ radius: 10, height: 20 });
-  const { meta } = await kernel.tessellateToCopy(cylinder);
+  const { meta } = await kernel.tessellate(cylinder);
 
   assert.ok(meta.triangleCount > 12, `only ${meta.triangleCount} triangles`);
 
@@ -59,11 +59,11 @@ test('finer deflection increases fidelity', { skip }, async () => {
   const radius = 20;
   const cylinder = await kernel.createCylinder({ radius, height: 30 });
 
-  const coarse = await kernel.tessellateToCopy(cylinder, {
+  const coarse = await kernel.tessellate(cylinder, {
     linearDeflection: 2,
     angularDeflection: 1.0,
   });
-  const fine = await kernel.tessellateToCopy(cylinder, {
+  const fine = await kernel.tessellate(cylinder, {
     linearDeflection: 0.05,
     angularDeflection: 0.1,
   });
@@ -90,7 +90,7 @@ test('the documented default tolerance is applied and reported', { skip }, async
   const kernel = await makeKernel();
   const box = await kernel.createBox({ width: 10, depth: 10, height: 10 });
 
-  const { meta } = await kernel.tessellateToCopy(box);
+  const { meta } = await kernel.tessellate(box);
   const defaults = kernel.defaultTolerances;
 
   // The applied tolerance is never implicit.
@@ -104,15 +104,15 @@ test('a non-positive tolerance is rejected', { skip }, async () => {
   const box = await kernel.createBox({ width: 10, depth: 10, height: 10 });
 
   await assert.rejects(
-    () => kernel.tessellateToCopy(box, { linearDeflection: 0 }),
+    () => kernel.tessellate(box, { linearDeflection: 0 }),
     InvalidParameterError,
   );
   await assert.rejects(
-    () => kernel.tessellateToCopy(box, { linearDeflection: -1 }),
+    () => kernel.tessellate(box, { linearDeflection: -1 }),
     InvalidParameterError,
   );
   await assert.rejects(
-    () => kernel.tessellateToCopy(box, { angularDeflection: -0.5 }),
+    () => kernel.tessellate(box, { angularDeflection: -0.5 }),
     InvalidParameterError,
   );
 });
@@ -121,10 +121,10 @@ test('a repeated tessellation is served from cache', { skip }, async () => {
   const kernel = await makeKernel();
   const cylinder = await kernel.createCylinder({ radius: 15, height: 30 });
 
-  const first = await kernel.tessellateToCopy(cylinder, { linearDeflection: 0.05 });
+  const first = await kernel.tessellate(cylinder, { linearDeflection: 0.05 });
   assert.equal(first.meta.fromCache, false);
 
-  const second = await kernel.tessellateToCopy(cylinder, { linearDeflection: 0.05 });
+  const second = await kernel.tessellate(cylinder, { linearDeflection: 0.05 });
   assert.equal(second.meta.fromCache, true, 'second call should hit the cache');
 
   // Equivalent mesh, and the mesher did not run again.
@@ -141,12 +141,48 @@ test('a repeated tessellation is served from cache', { skip }, async () => {
   );
 });
 
+/**
+ * A cache hit must not hand two callers the same buffers.
+ *
+ * The cache stores the kernel-side tessellation, and every delivery copies out
+ * of it. Serving the same arrays twice would mean one caller mutating its mesh
+ * silently corrupts another's - and, once buffers are transferred across a
+ * Worker boundary, the second delivery would arrive already detached.
+ */
+test('a cache hit delivers independent buffers', { skip }, async () => {
+  const kernel = await makeKernel();
+  const cylinder = await kernel.createCylinder({ radius: 15, height: 30 });
+
+  const first = await kernel.tessellate(cylinder, { linearDeflection: 0.05 });
+  const second = await kernel.tessellate(cylinder, { linearDeflection: 0.05 });
+  assert.equal(second.meta.fromCache, true, 'precondition: the second call hits the cache');
+
+  assert.notEqual(
+    first.mesh.positions.buffer,
+    second.mesh.positions.buffer,
+    'each delivery must own its buffers',
+  );
+
+  const original = first.mesh.positions[0];
+  assert.ok(original !== undefined);
+  second.mesh.positions[0] = original + 1000;
+  assert.equal(
+    first.mesh.positions[0],
+    original,
+    'mutating one delivered mesh must not affect another',
+  );
+
+  // And the cache itself is unharmed: a third call still matches the first.
+  const third = await kernel.tessellate(cylinder, { linearDeflection: 0.05 });
+  assert.equal(third.mesh.positions[0], original);
+});
+
 test('a different tolerance bypasses the cache', { skip }, async () => {
   const kernel = await makeKernel();
   const cylinder = await kernel.createCylinder({ radius: 15, height: 30 });
 
-  await kernel.tessellateToCopy(cylinder, { linearDeflection: 0.5 });
-  const other = await kernel.tessellateToCopy(cylinder, { linearDeflection: 0.05 });
+  await kernel.tessellate(cylinder, { linearDeflection: 0.5 });
+  const other = await kernel.tessellate(cylinder, { linearDeflection: 0.05 });
 
   assert.equal(other.meta.fromCache, false, 'a new tolerance must be recomputed');
   assert.equal(kernel.stats().cachedMeshCount, 2);
@@ -156,7 +192,7 @@ test('releasing a body evicts its cached mesh', { skip }, async () => {
   const kernel = await makeKernel();
   const cylinder = await kernel.createCylinder({ radius: 15, height: 30 });
 
-  await kernel.tessellateToCopy(cylinder, { linearDeflection: 0.05 });
+  await kernel.tessellate(cylinder, { linearDeflection: 0.05 });
   assert.equal(kernel.stats().cachedMeshCount, 1);
   assert.ok(kernel.stats().meshCacheBytes > 0);
 
@@ -165,7 +201,7 @@ test('releasing a body evicts its cached mesh', { skip }, async () => {
   assert.equal(kernel.stats().cachedMeshCount, 0, 'cache entry must be evicted');
   assert.equal(kernel.stats().meshCacheBytes, 0);
   await assert.rejects(
-    () => kernel.tessellateToCopy(cylinder),
+    () => kernel.tessellate(cylinder),
     InvalidHandleError,
     'a released handle must serve no mesh',
   );
@@ -175,8 +211,8 @@ test('re-tessellating after discarding a mesh gives an equivalent mesh', { skip 
   const kernel = await makeKernel();
   const box = await kernel.createBox({ width: 12, depth: 8, height: 6 });
 
-  const first = await kernel.tessellateToCopy(box, { linearDeflection: 0.1 });
-  const second = await kernel.tessellateToCopy(box, { linearDeflection: 0.1 });
+  const first = await kernel.tessellate(box, { linearDeflection: 0.1 });
+  const second = await kernel.tessellate(box, { linearDeflection: 0.1 });
 
   // Discarding a mesh cannot affect the geometry: mesh is derived output only.
   assert.equal(second.meta.triangleCount, first.meta.triangleCount);
@@ -225,8 +261,11 @@ test('tessellation still works after WASM memory grows', { skip }, async () => {
   const startBytes = kernel.stats().wasmMemoryBytes;
 
   const probe = await kernel.createCylinder({ radius: 5, height: 10 });
-  const before = await kernel.tessellateToCopy(probe, { linearDeflection: 0.1 });
+  const before = await kernel.tessellate(probe, { linearDeflection: 0.1 });
   assert.ok(before.meta.triangleCount > 0);
+  // Retained across the growth below. Delivered buffers are owned copies, so
+  // this must survive intact - the whole point of not handing out heap views.
+  const retained = Array.from(before.mesh.positions.slice(0, 24));
 
   // Allocate until linear memory actually grows.
   const ballast = [];
@@ -238,15 +277,23 @@ test('tessellation still works after WASM memory grows', { skip }, async () => {
       origin: [i * 100, 0, 0],
     });
     ballast.push(body);
-    await kernel.tessellateToCopy(body, { linearDeflection: 0.004 });
+    await kernel.tessellate(body, { linearDeflection: 0.004 });
     grew = kernel.stats().wasmMemoryBytes > startBytes;
   }
 
   assert.ok(grew, 'could not force WASM memory growth; test is inconclusive');
 
+  // A mesh handed out before the growth is still readable and unchanged. A view
+  // over WASM memory would be detached by now and throw on access.
+  assert.deepEqual(
+    Array.from(before.mesh.positions.slice(0, 24)),
+    retained,
+    'a retained mesh must survive WASM memory growth',
+  );
+
   // The real assertion: views derived after growth are valid. A retained view
   // would throw "Cannot perform Construct on a detached ArrayBuffer" here.
-  const after = await kernel.tessellateToCopy(probe, { linearDeflection: 0.05 });
+  const after = await kernel.tessellate(probe, { linearDeflection: 0.05 });
   assert.ok(after.meta.triangleCount > 0);
   assert.equal(after.mesh.positions.length, after.meta.vertexCount * 3);
   for (const index of after.mesh.indices) {
@@ -255,7 +302,7 @@ test('tessellation still works after WASM memory grows', { skip }, async () => {
 
   // And a fresh body still tessellates correctly after growth.
   const fresh = await kernel.createBox({ width: 5, depth: 5, height: 5 });
-  const freshMesh = await kernel.tessellateToCopy(fresh);
+  const freshMesh = await kernel.tessellate(fresh);
   assert.ok(freshMesh.meta.triangleCount >= 12);
 
   for (const body of ballast) await kernel.release(body);

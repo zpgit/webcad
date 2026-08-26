@@ -1,9 +1,7 @@
 import {
-  InvalidParameterError,
   KernelNotReadyError,
-  Status,
-  WebAssemblyUnsupportedError,
-  throwForStatus,
+  KernelTerminatedError,
+  reviveFailure,
 } from './errors.ts';
 import type {
   BodyId,
@@ -14,42 +12,39 @@ import type {
   CylinderOptions,
   FaceTypeSummary,
   KernelStats,
+  MeshBuffers,
   MeshMeta,
-  MeshViews,
   OperationRecord,
   TessellationOptions,
 } from './types.ts';
 import { asBodyId } from './types.ts';
-import type { KernelModule, KernelModuleFactory } from './wasm-module.ts';
-
-const BOOLEAN_KIND_CODE: Record<BooleanKind, number> = {
-  union: 0,
-  subtract: 1,
-  intersect: 2,
-};
+import type { KernelModuleFactory } from './wasm-module.ts';
+import { defaultLoadModule } from './worker/load-module.ts';
+import type {
+  BodyResult,
+  BooleanResult,
+  InitResult,
+  KernelRequest,
+  MeshResult,
+  ResponseTail,
+} from './worker/protocol.ts';
+import { InProcessTransport, type Transport } from './worker/transport.ts';
+import { WorkerTransport } from './worker/worker-transport.ts';
 
 export interface KernelOptions {
   /**
-   * Overrides how the WASM module is loaded. Tests point this at the build
-   * output; the browser uses the default, which resolves relative to this file.
+   * Overrides how the WASM module is loaded by the default in-process
+   * transport. Tests point this at the build output. Ignored when `transport`
+   * is supplied, since the transport then owns the module.
    */
   loadModule?: KernelModuleFactory;
+  /** Where the request handler lives. Defaults to in-process. */
+  transport?: Transport;
   /** Retained operation-log entries. Older entries are dropped. */
   logLimit?: number;
 }
 
 const DEFAULT_LOG_LIMIT = 500;
-
-async function defaultLoadModule(): Promise<KernelModule> {
-  const url = new URL('./wasm/webcad_kernel.mjs', import.meta.url).href;
-  // @vite-ignore: the artifact is a build product, absent from a fresh
-  // checkout. A static import would make `vite build` fail before the kernel
-  // has ever been compiled.
-  const mod = (await import(/* @vite-ignore */ url)) as {
-    default: KernelModuleFactory;
-  };
-  return mod.default();
-}
 
 /**
  * The geometry kernel: a handle-based facade over OCCT running in WASM.
@@ -58,21 +53,25 @@ async function defaultLoadModule(): Promise<KernelModule> {
  * their lifetime - WASM linear memory is invisible to the JavaScript garbage
  * collector, so an unreleased body leaks until the module is discarded.
  *
- * Every operation is async even though MVP-0 runs the kernel on the main thread.
- * The architecture note leaves the Worker question open and expects MVP-0's
- * measurements to answer it; an async surface means acting on that answer
- * changes the transport, not every call site.
+ * This class holds no module. It is a proxy over a `Transport`, which reaches
+ * the request handler wherever it lives - a Worker in the browser, in-process
+ * for tests. MVP-0 measured a two-primitive Boolean at four frames on the main
+ * thread, which is why the browser path is the Worker one.
  */
 export class Kernel {
-  #module: KernelModule | null = null;
+  #transport: Transport | null;
   #initPromise: Promise<void> | null = null;
+  #ready: InitResult | null = null;
   #log: OperationRecord[] = [];
+  #stats: KernelStats | null = null;
+  #nextRequestId = 1;
 
-  readonly #loadModule: KernelModuleFactory;
   readonly #logLimit: number;
 
   constructor(options: KernelOptions = {}) {
-    this.#loadModule = options.loadModule ?? defaultLoadModule;
+    this.#transport =
+      options.transport ??
+      new InProcessTransport(options.loadModule ?? defaultLoadModule);
     this.#logLimit = options.logLimit ?? DEFAULT_LOG_LIMIT;
   }
 
@@ -83,55 +82,66 @@ export class Kernel {
     return kernel;
   }
 
+  /**
+   * A kernel whose OCCT module runs in a dedicated Worker. What the browser
+   * should use: on the main thread a two-primitive Boolean costs four frames.
+   */
+  static createInWorker(
+    options: Omit<KernelOptions, 'transport' | 'loadModule'> = {},
+  ): Promise<Kernel> {
+    return Kernel.create({ ...options, transport: new WorkerTransport() });
+  }
+
   get isReady(): boolean {
-    return this.#module !== null;
+    return this.#ready !== null;
   }
 
   /**
-   * Loads and instantiates the WASM module.
+   * Starts the transport's host and instantiates the WASM module inside it.
    *
    * Idempotent: concurrent and repeated calls share one instantiation and every
    * caller receives the same ready instance. On failure no partially
    * constructed kernel is left behind, and a later call may retry.
    */
   async initialize(): Promise<void> {
-    if (this.#module !== null) return;
+    if (this.#ready !== null) return;
 
     this.#initPromise ??= (async () => {
-      if (typeof WebAssembly === 'undefined') {
-        throw new WebAssemblyUnsupportedError(
-          'WebAssembly is not available in this environment',
+      const transport = this.#transport;
+      if (transport === null) {
+        throw new KernelTerminatedError(
+          'the kernel has been disposed',
+          'initialize',
         );
       }
-      try {
-        this.#module = await this.#loadModule();
-      } catch (cause) {
-        throw new WebAssemblyUnsupportedError(
-          'the geometry kernel module failed to instantiate',
-          { cause },
-        );
-      }
+      transport.onFailure((error) => {
+        this.#onTransportFailure(error);
+      });
+      this.#ready = await this.#dispatch<InitResult>({ kind: 'init' });
     })();
 
     try {
       await this.#initPromise;
     } catch (error) {
-      // Allow a retry rather than wedging the instance on a transient failure.
+      // Allow a retry rather than wedging the instance on a transient failure,
+      // and leave nothing half-started behind: the transport discards whatever
+      // host it spawned, and the next attempt begins from scratch.
       this.#initPromise = null;
-      this.#module = null;
+      this.#ready = null;
+      this.#transport?.reset();
       throw error;
     }
   }
 
   get occtVersion(): string {
-    return this.#require('occtVersion').occtVersion();
+    return this.#require('occtVersion').occtVersion;
   }
 
   get defaultTolerances(): { linear: number; angular: number } {
-    const mod = this.#require('defaultTolerances');
+    const ready = this.#require('defaultTolerances');
     return {
-      linear: mod.defaultLinearDeflection,
-      angular: mod.defaultAngularDeflection,
+      linear: ready.defaultLinearDeflection,
+      angular: ready.defaultAngularDeflection,
     };
   }
 
@@ -147,52 +157,20 @@ export class Kernel {
   // --- Primitives ----------------------------------------------------------
 
   async createBox(options: BoxOptions): Promise<BodyId> {
-    const mod = this.#require('createBox');
-    const [ox, oy, oz] = options.origin ?? [0, 0, 0];
-    const [ax, ay, az] = options.axis ?? [0, 0, 1];
-
-    const result = this.#timed('createBox', () =>
-      mod.createBox({
-        width: options.width,
-        depth: options.depth,
-        height: options.height,
-        originX: ox,
-        originY: oy,
-        originZ: oz,
-        axisX: ax,
-        axisY: ay,
-        axisZ: az,
-        angle: options.angle ?? 0,
-      }),
-    );
-
-    if (result.status !== Status.Ok) {
-      throwForStatus(result.status, result.message, 'createBox');
-    }
+    this.#require('createBox');
+    const result = await this.#dispatch<BodyResult>({
+      kind: 'createBox',
+      options,
+    });
     return asBodyId(result.bodyId);
   }
 
   async createCylinder(options: CylinderOptions): Promise<BodyId> {
-    const mod = this.#require('createCylinder');
-    const [ox, oy, oz] = options.origin ?? [0, 0, 0];
-    const [ax, ay, az] = options.axis ?? [0, 0, 1];
-
-    const result = this.#timed('createCylinder', () =>
-      mod.createCylinder({
-        radius: options.radius,
-        height: options.height,
-        originX: ox,
-        originY: oy,
-        originZ: oz,
-        axisX: ax,
-        axisY: ay,
-        axisZ: az,
-      }),
-    );
-
-    if (result.status !== Status.Ok) {
-      throwForStatus(result.status, result.message, 'createCylinder');
-    }
+    this.#require('createCylinder');
+    const result = await this.#dispatch<BodyResult>({
+      kind: 'createCylinder',
+      options,
+    });
     return asBodyId(result.bodyId);
   }
 
@@ -208,18 +186,18 @@ export class Kernel {
     target: BodyId,
     tool: BodyId,
   ): Promise<BooleanOutcome> {
-    const mod = this.#require(kind);
-    const result = this.#timed(kind, () =>
-      mod.booleanOp(target, tool, BOOLEAN_KIND_CODE[kind]),
-    );
+    this.#require(kind);
+    const result = await this.#dispatch<BooleanResult>({
+      kind: 'boolean',
+      op: kind,
+      target,
+      tool,
+    });
 
     // Not an error: a subtract that removes all material, or an intersect of
     // disjoint solids, legitimately produces nothing.
-    if (result.status === Status.EmptyResult) {
+    if (result.kind === 'empty') {
       return { kind: 'empty', message: result.message };
-    }
-    if (result.status !== Status.Ok) {
-      throwForStatus(result.status, result.message, kind);
     }
     return {
       kind: 'body',
@@ -243,93 +221,26 @@ export class Kernel {
   // --- Tessellation --------------------------------------------------------
 
   /**
-   * Tessellates a body and hands typed-array views over WASM memory to
-   * `consume`.
+   * Tessellates a body and returns the mesh as buffers the caller owns.
    *
-   * The views are valid ONLY inside the callback. Growing WASM memory detaches
-   * its backing ArrayBuffer and invalidates every existing view, so a stored
-   * view is a latent crash rather than merely stale data. Taking a callback
-   * makes that rule structural: there is no way to obtain a view that outlives
-   * the synchronous block it was created in. Upload to the GPU, or copy, inside.
+   * MVP-0 exposed this as a callback taking typed-array views over WASM memory,
+   * to make one rule structural: a view must not outlive the synchronous block,
+   * because growing the heap detaches it. With the module behind a transport
+   * there is no view on this side to protect, so the rule has no subject left
+   * and the callback that enforced it is gone. Keep the result as long as you
+   * like.
    */
-  async withTessellation<T>(
-    bodyId: BodyId,
-    options: TessellationOptions,
-    consume: (views: MeshViews, meta: MeshMeta) => T,
-  ): Promise<T> {
-    const mod = this.#require('tessellate');
-
-    // Rejected here rather than in C++ so a caller cannot express an unbounded
-    // tessellation; the native side treats non-positive as "use the default".
-    if (options.linearDeflection !== undefined && !(options.linearDeflection > 0)) {
-      throw new InvalidParameterError(
-        'linearDeflection must be positive',
-        'tessellate',
-      );
-    }
-    if (options.angularDeflection !== undefined && !(options.angularDeflection > 0)) {
-      throw new InvalidParameterError(
-        'angularDeflection must be positive',
-        'tessellate',
-      );
-    }
-
-    const result = this.#timed('tessellate', () =>
-      mod.tessellate(bodyId, {
-        linearDeflection: options.linearDeflection ?? 0,
-        angularDeflection: options.angularDeflection ?? 0,
-      }),
-    );
-
-    if (result.status !== Status.Ok) {
-      throwForStatus(result.status, result.message, 'tessellate');
-    }
-
-    const meta: MeshMeta = {
-      vertexCount: result.vertexCount,
-      triangleCount: result.triangleCount,
-      linearDeflection: result.linearDeflection,
-      angularDeflection: result.angularDeflection,
-      fromCache: result.fromCache,
-    };
-    this.#annotateLastLog(result.triangleCount);
-
-    // Views are derived from the module's CURRENT heap views and handed straight
-    // to the callback. Nothing here retains them.
-    const floats = result.vertexCount * 3;
-    const ints = result.triangleCount * 3;
-    const views: MeshViews = {
-      positions: mod.HEAPF32.subarray(
-        result.positionsPtr / 4,
-        result.positionsPtr / 4 + floats,
-      ),
-      normals: mod.HEAPF32.subarray(
-        result.normalsPtr / 4,
-        result.normalsPtr / 4 + floats,
-      ),
-      indices: mod.HEAPU32.subarray(
-        result.indicesPtr / 4,
-        result.indicesPtr / 4 + ints,
-      ),
-    };
-
-    return consume(views, meta);
-  }
-
-  /** Tessellates and copies the mesh out, for callers that must retain it. */
-  async tessellateToCopy(
+  async tessellate(
     bodyId: BodyId,
     options: TessellationOptions = {},
-  ): Promise<{ mesh: MeshViews; meta: MeshMeta }> {
-    return this.withTessellation(bodyId, options, (views, meta) => ({
-      // Copies, so these outlive the callback and survive memory growth.
-      mesh: {
-        positions: new Float32Array(views.positions),
-        normals: new Float32Array(views.normals),
-        indices: new Uint32Array(views.indices),
-      },
-      meta,
-    }));
+  ): Promise<{ mesh: MeshBuffers; meta: MeshMeta }> {
+    this.#require('tessellate');
+    const result = await this.#dispatch<MeshResult>({
+      kind: 'tessellate',
+      bodyId,
+      options,
+    });
+    return { mesh: result.mesh, meta: result.meta };
   }
 
   // --- Lifetime and inspection --------------------------------------------
@@ -342,94 +253,101 @@ export class Kernel {
    * WASM linear memory, so nothing reclaims a body implicitly.
    */
   async release(bodyId: BodyId): Promise<void> {
-    const mod = this.#require('release');
-    const result = this.#timed('release', () => mod.releaseBody(bodyId));
-    if (result.status !== Status.Ok) {
-      throwForStatus(result.status, result.message, 'release');
-    }
+    this.#require('release');
+    await this.#dispatch<null>({ kind: 'release', bodyId });
   }
 
   async bodyInfo(bodyId: BodyId): Promise<BodyInfo> {
-    const mod = this.#require('bodyInfo');
-    const raw = this.#timed('bodyInfo', () => mod.bodyInfo(bodyId));
-    if (raw.status !== Status.Ok) {
-      throwForStatus(raw.status, raw.message, 'bodyInfo');
-    }
-    return {
-      faceCount: raw.faceCount,
-      edgeCount: raw.edgeCount,
-      vertexCount: raw.vertexCount,
-      solidCount: raw.solidCount,
-      volume: raw.volume,
-      area: raw.area,
-      boundingBox: {
-        min: [raw.bboxMinX, raw.bboxMinY, raw.bboxMinZ],
-        max: [raw.bboxMaxX, raw.bboxMaxY, raw.bboxMaxZ],
-      },
-      isValid: raw.isValid,
-      isClosed: raw.isClosed,
-    };
+    this.#require('bodyInfo');
+    return this.#dispatch<BodyInfo>({ kind: 'bodyInfo', bodyId });
   }
 
   async faceTypeSummary(bodyId: BodyId): Promise<FaceTypeSummary> {
-    const mod = this.#require('faceTypeSummary');
-    const raw = this.#timed('faceTypeSummary', () => mod.faceTypeSummary(bodyId));
-    if (raw.status !== Status.Ok) {
-      throwForStatus(raw.status, raw.message, 'faceTypeSummary');
-    }
-    const { status: _s, message: _m, ...counts } = raw;
-    return counts;
+    this.#require('faceTypeSummary');
+    return this.#dispatch<FaceTypeSummary>({ kind: 'faceTypeSummary', bodyId });
   }
 
-  /** Live handle count and WASM memory, for leak detection and measurement. */
+  /**
+   * Live handle count and WASM memory, for leak detection and measurement.
+   *
+   * The snapshot from the last completed operation. Kernel state only changes
+   * when an operation runs, so this is current except while one is in flight -
+   * and keeping it synchronous is what lets the readout render every frame
+   * without a round trip. Use `refreshStats` when exactness now matters.
+   */
   stats(): KernelStats {
-    const mod = this.#require('stats');
-    return mod.stats();
+    this.#require('stats');
+    if (this.#stats === null) throw new KernelNotReadyError('stats');
+    return this.#stats;
+  }
+
+  /** Fetches statistics from the kernel rather than reading the snapshot. */
+  async refreshStats(): Promise<KernelStats> {
+    this.#require('refreshStats');
+    return this.#dispatch<KernelStats>({ kind: 'stats' });
+  }
+
+  /**
+   * Terminates the kernel's host. Every body it held goes away with it, so all
+   * outstanding handles become worthless rather than merely stale.
+   */
+  dispose(): void {
+    this.#transport?.dispose();
+    this.#transport = null;
+    this.#ready = null;
+    this.#initPromise = null;
+    this.#stats = null;
   }
 
   // --- Internals -----------------------------------------------------------
 
-  #require(operation: string): KernelModule {
-    if (this.#module === null) {
+  #require(operation: string): InitResult {
+    if (this.#ready === null) {
       throw new KernelNotReadyError(operation);
     }
-    return this.#module;
+    return this.#ready;
   }
 
   /**
-   * Times an operation and records it. MVP-0 exists to measure this boundary,
-   * so the log is a deliverable rather than a debugging aid - which is why
-   * failures are recorded too.
+   * Sends one request, mirrors the scalars that rode back with the response,
+   * and either resolves with the value or throws the revived error.
    */
-  #timed<T extends { status: number }>(operation: string, run: () => T): T {
-    const started = performance.now();
-    let status = Status.KernelOperationFailed as number;
-    try {
-      const result = run();
-      status = result.status;
-      return result;
-    } finally {
-      const mod = this.#module;
-      this.#record({
-        operation,
-        durationMs: performance.now() - started,
-        status,
-        wasmMemoryBytes: mod ? mod.HEAPU8.byteLength : 0,
-      });
+  async #dispatch<T>(request: KernelRequest): Promise<T> {
+    const transport = this.#transport;
+    if (transport === null) {
+      throw new KernelTerminatedError(
+        'the kernel has been disposed',
+        request.kind,
+      );
     }
+
+    const id = this.#nextRequestId++;
+    const started = performance.now();
+    const response = await transport.send({ id, request });
+    this.#absorb(response.tail, performance.now() - started);
+
+    if (!response.ok) throw reviveFailure(response.error);
+    return response.value as T;
   }
 
-  #record(entry: OperationRecord): void {
-    this.#log.push(entry);
+  /**
+   * Mirrors the response tail. The round trip is stamped here rather than in
+   * the handler because only this side can see it; the difference between it
+   * and the handler's own duration is what the transport cost.
+   */
+  #absorb(tail: ResponseTail, roundTripMs: number): void {
+    if (tail.stats !== undefined) this.#stats = tail.stats;
+    if (tail.record === undefined) return;
+
+    this.#log.push({ ...tail.record, roundTripMs });
     if (this.#log.length > this.#logLimit) {
       this.#log.splice(0, this.#log.length - this.#logLimit);
     }
   }
 
-  #annotateLastLog(triangleCount: number): void {
-    const last = this.#log[this.#log.length - 1];
-    if (last !== undefined) {
-      this.#log[this.#log.length - 1] = { ...last, triangleCount };
-    }
+  #onTransportFailure(error: Error): void {
+    this.#ready = null;
+    this.#initPromise = null;
+    console.error('[webcad] the geometry kernel stopped', error);
   }
 }

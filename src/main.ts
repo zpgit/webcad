@@ -43,9 +43,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  const kernel = new Kernel();
+  // In a Worker: OCCT operations run tens to hundreds of milliseconds against a
+  // 16.7 ms frame, so anything else freezes the viewport mid-operation.
+  let kernel: Kernel;
   try {
-    await kernel.initialize();
+    kernel = await Kernel.createInWorker();
   } catch (error) {
     showFatal(
       error instanceof KernelError

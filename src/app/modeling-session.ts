@@ -108,19 +108,14 @@ export class ModelingSession {
   }
 
   /**
-   * Tessellates and uploads in one synchronous window.
+   * Tessellates and hands the mesh to the viewport, which adopts it.
    *
-   * The mesh views address WASM linear memory and are invalidated when that
-   * memory grows, so the upload happens inside the callback and no view escapes.
+   * Ownership passes straight through: the kernel copied the mesh out of WASM
+   * memory once, and nothing between there and the GPU copies it again.
    */
   async #render(bodyId: BodyId): Promise<void> {
-    await this.#kernel.withTessellation(
-      bodyId,
-      this.#tessellation,
-      (views, meta) => {
-        this.#viewport.upsertBody(bodyId, views, meta);
-      },
-    );
+    const { mesh, meta } = await this.#kernel.tessellate(bodyId, this.#tessellation);
+    this.#viewport.upsertBody(bodyId, mesh, meta);
   }
 
   #emit(event: SessionEvent): void {

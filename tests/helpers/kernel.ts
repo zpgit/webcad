@@ -1,5 +1,6 @@
 import { Kernel } from '../../src/kernel/kernel.ts';
-import type { BodyId, MeshViews } from '../../src/kernel/types.ts';
+import type { BodyId, MeshBuffers } from '../../src/kernel/types.ts';
+import { InProcessTransport } from '../../src/kernel/worker/transport.ts';
 import { loadEmscriptenModule, skipUnlessBuilt } from './load-wasm.ts';
 
 export const KERNEL_ARTIFACT = 'src/kernel/wasm/webcad_kernel.mjs';
@@ -12,10 +13,15 @@ export const kernelSkip = skipUnlessBuilt(KERNEL_ARTIFACT, 'npm run kernel:build
  *
  * Each call instantiates a new WASM module, so handle numbering and statistics
  * start clean and tests cannot leak state into each other.
+ *
+ * Explicitly in-process rather than relying on the default: Node has no DOM
+ * `Worker`, and the point is to exercise the same request handler the Worker
+ * runs. What this path cannot catch is a serialization bug, which is why
+ * `npm run verify:browser` is the authority on the boundary itself.
  */
 export async function makeKernel(): Promise<Kernel> {
   return Kernel.create({
-    loadModule: () => loadEmscriptenModule(KERNEL_ARTIFACT),
+    transport: new InProcessTransport(() => loadEmscriptenModule(KERNEL_ARTIFACT)),
   });
 }
 
@@ -34,7 +40,7 @@ export function closeTo(actual: number, expected: number, relative = 1e-6): bool
  * short by radius * (1 - cos(d/2)). Measuring the worst such sagitta gives a
  * real deviation figure rather than a triangle count as a proxy for fidelity.
  */
-export function maxCylindricalDeviation(mesh: MeshViews, radius: number): number {
+export function maxCylindricalDeviation(mesh: MeshBuffers, radius: number): number {
   const radial = (i: number): number => {
     const x = mesh.positions[3 * i] ?? 0;
     const y = mesh.positions[3 * i + 1] ?? 0;

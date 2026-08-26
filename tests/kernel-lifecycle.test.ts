@@ -94,7 +94,7 @@ test('use after release fails with InvalidHandle', { skip }, async () => {
 
   await assert.rejects(() => kernel.bodyInfo(body), InvalidHandleError);
   await assert.rejects(
-    () => kernel.tessellateToCopy(body),
+    () => kernel.tessellate(body),
     InvalidHandleError,
   );
 });

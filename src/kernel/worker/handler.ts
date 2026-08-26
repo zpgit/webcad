@@ -1,0 +1,395 @@
+// The only code that touches the WASM module.
+//
+// Everything WASM-adjacent lives here so it can be hosted wherever the module
+// is: inside the kernel Worker in the browser, or in-process for tests and
+// tooling. The transport decides which; this file cannot tell the difference,
+// which is what keeps the two paths from diverging.
+
+import {
+  InvalidParameterError,
+  KernelNotReadyError,
+  Status,
+  WebAssemblyUnsupportedError,
+  throwForStatus,
+  toFailure,
+} from '../errors.ts';
+import type {
+  BooleanKind,
+  BoxOptions,
+  CylinderOptions,
+  MeshMeta,
+  OperationRecord,
+  TessellationOptions,
+} from '../types.ts';
+import type { KernelModule, KernelModuleFactory } from '../wasm-module.ts';
+import type {
+  KernelEnvelope,
+  KernelRequest,
+  ResponseTail,
+  ServedResponse,
+} from './protocol.ts';
+
+const BOOLEAN_KIND_CODE: Record<BooleanKind, number> = {
+  union: 0,
+  subtract: 1,
+  intersect: 2,
+};
+
+export interface HandlerOutcome {
+  readonly value: unknown;
+  readonly transfer: readonly Transferable[];
+}
+
+export class KernelHandler {
+  #module: KernelModule | null = null;
+  #pendingRecord: OperationRecord | undefined;
+
+  readonly #loadModule: KernelModuleFactory;
+
+  constructor(loadModule: KernelModuleFactory) {
+    this.#loadModule = loadModule;
+  }
+
+  async handle(request: KernelRequest): Promise<HandlerOutcome> {
+    switch (request.kind) {
+      case 'init':
+        return this.#init();
+      case 'createBox':
+        return this.#createBox(request.options);
+      case 'createCylinder':
+        return this.#createCylinder(request.options);
+      case 'boolean':
+        return this.#boolean(request.op, request.target, request.tool);
+      case 'tessellate':
+        return this.#tessellate(request.bodyId, request.options);
+      case 'release':
+        return this.#release(request.bodyId);
+      case 'bodyInfo':
+        return this.#bodyInfo(request.bodyId);
+      case 'faceTypeSummary':
+        return this.#faceTypeSummary(request.bodyId);
+      case 'stats':
+        return { value: this.#require('stats').stats(), transfer: [] };
+    }
+  }
+
+  /**
+   * The scalars appended to the response for the request just handled, and then
+   * cleared. Read on both the success and the failure path, because a failed
+   * operation is logged too - MVP-0 found that distinction worth keeping.
+   */
+  takeTail(): ResponseTail {
+    const record = this.#pendingRecord;
+    this.#pendingRecord = undefined;
+    const mod = this.#module;
+    return {
+      ...(record === undefined ? {} : { record }),
+      ...(mod === null ? {} : { stats: mod.stats() }),
+    };
+  }
+
+  /** Drops the module. The Worker is normally terminated instead. */
+  dispose(): void {
+    this.#module = null;
+  }
+
+  // --- Operations ----------------------------------------------------------
+
+  async #init(): Promise<HandlerOutcome> {
+    if (this.#module === null) {
+      if (typeof WebAssembly === 'undefined') {
+        throw new WebAssemblyUnsupportedError(
+          'WebAssembly is not available in this environment',
+        );
+      }
+      try {
+        this.#module = await this.#loadModule();
+      } catch (cause) {
+        throw new WebAssemblyUnsupportedError(
+          'the geometry kernel module failed to instantiate',
+          { cause },
+        );
+      }
+    }
+    const mod = this.#module;
+    return {
+      value: {
+        occtVersion: mod.occtVersion(),
+        defaultLinearDeflection: mod.defaultLinearDeflection,
+        defaultAngularDeflection: mod.defaultAngularDeflection,
+      },
+      transfer: [],
+    };
+  }
+
+  #createBox(options: BoxOptions): HandlerOutcome {
+    const mod = this.#require('createBox');
+    const [ox, oy, oz] = options.origin ?? [0, 0, 0];
+    const [ax, ay, az] = options.axis ?? [0, 0, 1];
+
+    const result = this.#timed('createBox', () =>
+      mod.createBox({
+        width: options.width,
+        depth: options.depth,
+        height: options.height,
+        originX: ox,
+        originY: oy,
+        originZ: oz,
+        axisX: ax,
+        axisY: ay,
+        axisZ: az,
+        angle: options.angle ?? 0,
+      }),
+    );
+
+    if (result.status !== Status.Ok) {
+      throwForStatus(result.status, result.message, 'createBox');
+    }
+    return { value: { bodyId: result.bodyId }, transfer: [] };
+  }
+
+  #createCylinder(options: CylinderOptions): HandlerOutcome {
+    const mod = this.#require('createCylinder');
+    const [ox, oy, oz] = options.origin ?? [0, 0, 0];
+    const [ax, ay, az] = options.axis ?? [0, 0, 1];
+
+    const result = this.#timed('createCylinder', () =>
+      mod.createCylinder({
+        radius: options.radius,
+        height: options.height,
+        originX: ox,
+        originY: oy,
+        originZ: oz,
+        axisX: ax,
+        axisY: ay,
+        axisZ: az,
+      }),
+    );
+
+    if (result.status !== Status.Ok) {
+      throwForStatus(result.status, result.message, 'createCylinder');
+    }
+    return { value: { bodyId: result.bodyId }, transfer: [] };
+  }
+
+  #boolean(kind: BooleanKind, target: number, tool: number): HandlerOutcome {
+    const mod = this.#require(kind);
+    const result = this.#timed(kind, () =>
+      mod.booleanOp(target, tool, BOOLEAN_KIND_CODE[kind]),
+    );
+
+    // Not an error: a subtract that removes all material, or an intersect of
+    // disjoint solids, legitimately produces nothing.
+    if (result.status === Status.EmptyResult) {
+      return { value: { kind: 'empty', message: result.message }, transfer: [] };
+    }
+    if (result.status !== Status.Ok) {
+      throwForStatus(result.status, result.message, kind);
+    }
+    return {
+      value: {
+        kind: 'body',
+        bodyId: result.bodyId,
+        solidCount: result.solidCount,
+      },
+      transfer: [],
+    };
+  }
+
+  /**
+   * Tessellates and copies the mesh into buffers the caller will own.
+   *
+   * The copy out of WASM memory is unavoidable once the module lives on its own
+   * thread, so it is timed and its size recorded rather than treated as free -
+   * MVP-0's findings called for exactly this figure. Copying also means a cache
+   * hit never hands two callers the same buffer.
+   */
+  #tessellate(bodyId: number, options: TessellationOptions): HandlerOutcome {
+    const mod = this.#require('tessellate');
+
+    // Rejected here rather than in C++ so a caller cannot express an unbounded
+    // tessellation; the native side treats non-positive as "use the default".
+    if (options.linearDeflection !== undefined && !(options.linearDeflection > 0)) {
+      throw new InvalidParameterError(
+        'linearDeflection must be positive',
+        'tessellate',
+      );
+    }
+    if (options.angularDeflection !== undefined && !(options.angularDeflection > 0)) {
+      throw new InvalidParameterError(
+        'angularDeflection must be positive',
+        'tessellate',
+      );
+    }
+
+    const result = this.#timed('tessellate', () =>
+      mod.tessellate(bodyId, {
+        linearDeflection: options.linearDeflection ?? 0,
+        angularDeflection: options.angularDeflection ?? 0,
+      }),
+    );
+
+    if (result.status !== Status.Ok) {
+      throwForStatus(result.status, result.message, 'tessellate');
+    }
+
+    const meta: MeshMeta = {
+      vertexCount: result.vertexCount,
+      triangleCount: result.triangleCount,
+      linearDeflection: result.linearDeflection,
+      angularDeflection: result.angularDeflection,
+      fromCache: result.fromCache,
+    };
+
+    // Heap views are read and copied in one synchronous block. Nothing retains
+    // them: growing WASM memory detaches the backing buffer, so a view that
+    // outlived this block would be a latent crash rather than stale data.
+    const copyStarted = performance.now();
+    const floats = result.vertexCount * 3;
+    const ints = result.triangleCount * 3;
+    const positions = mod.HEAPF32.slice(
+      result.positionsPtr / 4,
+      result.positionsPtr / 4 + floats,
+    );
+    const normals = mod.HEAPF32.slice(
+      result.normalsPtr / 4,
+      result.normalsPtr / 4 + floats,
+    );
+    const indices = mod.HEAPU32.slice(
+      result.indicesPtr / 4,
+      result.indicesPtr / 4 + ints,
+    );
+    const copyMs = performance.now() - copyStarted;
+
+    this.#annotateRecord({
+      triangleCount: result.triangleCount,
+      copyMs,
+      transferBytes:
+        positions.byteLength + normals.byteLength + indices.byteLength,
+    });
+
+    return {
+      value: { mesh: { positions, normals, indices }, meta },
+      transfer: [
+        positions.buffer as ArrayBuffer,
+        normals.buffer as ArrayBuffer,
+        indices.buffer as ArrayBuffer,
+      ],
+    };
+  }
+
+  #release(bodyId: number): HandlerOutcome {
+    const mod = this.#require('release');
+    const result = this.#timed('release', () => mod.releaseBody(bodyId));
+    if (result.status !== Status.Ok) {
+      throwForStatus(result.status, result.message, 'release');
+    }
+    return { value: null, transfer: [] };
+  }
+
+  #bodyInfo(bodyId: number): HandlerOutcome {
+    const mod = this.#require('bodyInfo');
+    const raw = this.#timed('bodyInfo', () => mod.bodyInfo(bodyId));
+    if (raw.status !== Status.Ok) {
+      throwForStatus(raw.status, raw.message, 'bodyInfo');
+    }
+    return {
+      value: {
+        faceCount: raw.faceCount,
+        edgeCount: raw.edgeCount,
+        vertexCount: raw.vertexCount,
+        solidCount: raw.solidCount,
+        volume: raw.volume,
+        area: raw.area,
+        boundingBox: {
+          min: [raw.bboxMinX, raw.bboxMinY, raw.bboxMinZ],
+          max: [raw.bboxMaxX, raw.bboxMaxY, raw.bboxMaxZ],
+        },
+        isValid: raw.isValid,
+        isClosed: raw.isClosed,
+      },
+      transfer: [],
+    };
+  }
+
+  #faceTypeSummary(bodyId: number): HandlerOutcome {
+    const mod = this.#require('faceTypeSummary');
+    const raw = this.#timed('faceTypeSummary', () => mod.faceTypeSummary(bodyId));
+    if (raw.status !== Status.Ok) {
+      throwForStatus(raw.status, raw.message, 'faceTypeSummary');
+    }
+    const { status: _s, message: _m, ...counts } = raw;
+    return { value: counts, transfer: [] };
+  }
+
+  // --- Internals -----------------------------------------------------------
+
+  #require(operation: string): KernelModule {
+    if (this.#module === null) {
+      throw new KernelNotReadyError(operation);
+    }
+    return this.#module;
+  }
+
+  /**
+   * Times an operation and stages its log record. This stage exists to measure
+   * the boundary, so the log is a deliverable rather than a debugging aid -
+   * which is why failures are recorded too.
+   */
+  #timed<T extends { status: number }>(operation: string, run: () => T): T {
+    const started = performance.now();
+    let status = Status.KernelOperationFailed as number;
+    try {
+      const result = run();
+      status = result.status;
+      return result;
+    } finally {
+      const mod = this.#module;
+      this.#pendingRecord = {
+        operation,
+        durationMs: performance.now() - started,
+        status,
+        wasmMemoryBytes: mod ? mod.HEAPU8.byteLength : 0,
+      };
+    }
+  }
+
+  #annotateRecord(extra: Partial<OperationRecord>): void {
+    if (this.#pendingRecord !== undefined) {
+      this.#pendingRecord = { ...this.#pendingRecord, ...extra };
+    }
+  }
+}
+
+/**
+ * Runs one request and produces the response for it. Never throws: a failure is
+ * a response, because a transport that can reject out-of-band would leave the
+ * correlation map holding an entry nobody settles.
+ */
+export async function serve(
+  handler: KernelHandler,
+  envelope: KernelEnvelope,
+): Promise<ServedResponse> {
+  try {
+    const outcome = await handler.handle(envelope.request);
+    return {
+      response: {
+        id: envelope.id,
+        ok: true,
+        value: outcome.value,
+        tail: handler.takeTail(),
+      },
+      transfer: outcome.transfer,
+    };
+  } catch (error) {
+    return {
+      response: {
+        id: envelope.id,
+        ok: false,
+        error: toFailure(error, envelope.request.kind),
+        tail: handler.takeTail(),
+      },
+      transfer: [],
+    };
+  }
+}

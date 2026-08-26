@@ -1,27 +1,5 @@
-# tessellation Specification
+## MODIFIED Requirements
 
-## Purpose
-
-Defines how exact geometry becomes renderable triangles, and enforces that the
-conversion runs one way only.
-
-Mesh data is the single kind of geometric payload allowed to cross out of WASM,
-which makes this capability the one place the boundary rule is relaxed. The
-relaxation is bounded by specifying mesh as derived and disposable: no operation
-accepts mesh buffers as geometric input, and no path converts mesh back into
-canonical geometry. Without that, the mesh would gradually become a second
-source of truth and exactness would erode.
-
-Tolerance is caller-controlled because fidelity is a rendering decision, not a
-geometric one, and the tolerance actually applied is reported so that triangle
-counts and timings can be attributed to it.
-
-Caching is keyed on handle plus tolerance. That key is only sound because bodies
-are immutable and modeling operations mint new handles rather than mutating
-existing ones — a property `geometry-kernel` guarantees. If bodies ever become
-mutable, this cache key is the first thing that breaks.
-
-## Requirements
 ### Requirement: Tessellate a body into render buffers
 
 The kernel SHALL convert a canonical B-Rep body into renderable buffers — vertex positions, vertex normals, and triangle indices — and deliver them to the caller as owned buffers whose lifetime is independent of WASM linear memory. Tessellation output is the only geometric data permitted to cross the WASM boundary. Because the kernel runs in a Worker, the caller never receives a view aliasing kernel memory, and MUST be free to retain the delivered buffers indefinitely.
@@ -51,39 +29,6 @@ The kernel SHALL convert a canonical B-Rep body into renderable buffers — vert
 - **WHEN** a caller tessellates a `BodyId` that was never issued or has been released
 - **THEN** the operation fails with `InvalidHandle` and no buffers are produced
 
-### Requirement: Caller-controlled deflection tolerance
-
-Tessellation SHALL accept a linear deflection tolerance, and MAY accept an angular tolerance, controlling how finely curved surfaces are approximated. A smaller linear deflection MUST produce a mesh that approximates the exact surface at least as closely as a larger one.
-
-#### Scenario: Finer deflection increases fidelity
-
-- **WHEN** the same cylinder body is tessellated at a coarse linear deflection and then at a finer one
-- **THEN** the finer tessellation produces more triangles and a smaller maximum deviation from the exact cylindrical surface
-
-#### Scenario: Default tolerance applied
-
-- **WHEN** a caller tessellates a body without specifying a deflection tolerance
-- **THEN** a documented default is applied, and the tolerance actually used is reported in the result
-
-#### Scenario: Invalid tolerance rejected
-
-- **WHEN** a caller supplies a linear deflection that is zero or negative
-- **THEN** the operation fails with an `InvalidParameter` error rather than attempting an unbounded tessellation
-
-### Requirement: Mesh is never the geometric source of truth
-
-Tessellation output SHALL be treated as a derived, disposable render artifact. The system MUST NOT provide any path by which mesh data is converted back into canonical geometry, and MUST NOT use mesh data as input to any modeling operation.
-
-#### Scenario: No mesh-to-geometry path exists
-
-- **WHEN** the kernel API surface is reviewed for operations accepting mesh buffers as geometric input
-- **THEN** no such operation exists; modeling operations accept only handles and parameters
-
-#### Scenario: Discarding a mesh does not affect geometry
-
-- **WHEN** a caller discards a tessellation result and then re-tessellates the same body
-- **THEN** the body is unchanged and the newly produced mesh is equivalent to the discarded one for the same tolerance
-
 ### Requirement: Tessellation cache and invalidation
 
 The system SHALL be permitted to cache tessellation results per body and tolerance, and MUST ensure a cached mesh is never served for geometry it no longer represents. Because bodies are immutable once created and modeling operations produce new handles, cache entries are keyed by handle and tolerance. The cache lives on the kernel side of the Worker boundary, alongside the geometry it derives from; a cache hit still delivers owned buffers to the caller, so serving from cache MUST NOT hand out a buffer the kernel or a previous caller also holds.
@@ -107,4 +52,3 @@ The system SHALL be permitted to cache tessellation results per body and toleran
 
 - **WHEN** a caller releases a `BodyId` that has cached tessellation data
 - **THEN** the associated cache entry is evicted and its memory released, and the released handle serves no mesh
-

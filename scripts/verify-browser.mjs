@@ -35,6 +35,206 @@ const note = (message) => {
   console.log(`  ${message}`);
 };
 
+/**
+ * Measures what moving the kernel into a Worker cost and bought.
+ *
+ * Three questions, in the order the findings asked them: is the main thread
+ * actually free while the kernel works, what does the round trip add on top of
+ * kernel time, and what does moving a mesh across the boundary cost - with
+ * transferables measured against plain structured cloning rather than assumed
+ * better.
+ */
+async function measureWorkerBoundary(page) {
+  return page.evaluate(async () => {
+    const { kernel } = window.__webcad;
+
+    const summarize = (values) => {
+      if (values.length === 0) return null;
+      const sorted = [...values].sort((a, b) => a - b);
+      return {
+        count: sorted.length,
+        maxMs: sorted[sorted.length - 1],
+        medianMs: sorted[Math.floor(sorted.length / 2)],
+      };
+    };
+
+    // Transport overhead over the session so far: the demo scene and the
+    // Boolean, as actually driven through the UI.
+    const transport = kernel.operationLog
+      .filter((entry) => entry.roundTripMs !== undefined)
+      .map((entry) => ({
+        operation: entry.operation,
+        kernelMs: Number(entry.durationMs.toFixed(3)),
+        roundTripMs: Number(entry.roundTripMs.toFixed(3)),
+        transportMs: Number(
+          Math.max(0, entry.roundTripMs - entry.durationMs).toFixed(3),
+        ),
+      }));
+
+    /**
+     * How long the main thread goes unavailable while an operation runs.
+     *
+     * A self-rescheduling timer, not requestAnimationFrame: headless Chrome
+     * composites lazily and fires almost no frames, so a rAF probe reports
+     * nothing and cannot distinguish a free main thread from a blocked one. A
+     * timer measures event-loop availability, which is the actual claim - and a
+     * synchronous 66 ms kernel call would show up as one 66 ms gap.
+     *
+     * The 4 ms period is the browser's own clamp for nested timers, so the
+     * baseline gap is ~4-6 ms and anything at frame scale stands out.
+     */
+    const during = async (label, run) => {
+      const gaps = [];
+      let last = performance.now();
+      let running = true;
+      const tick = () => {
+        const now = performance.now();
+        gaps.push(now - last);
+        last = now;
+        if (running) setTimeout(tick, 4);
+      };
+      setTimeout(tick, 4);
+
+      const started = performance.now();
+      const value = await run();
+      const wallMs = performance.now() - started;
+      running = false;
+
+      // The first sample spans probe setup rather than the operation.
+      return {
+        label,
+        wallMs: Number(wallMs.toFixed(3)),
+        mainThread: summarize(gaps.slice(1)),
+        value,
+      };
+    };
+
+    // Operations chosen to be long enough to sample.
+    //
+    // A plain drilled block costs ~9 ms here, not the ~66 ms MVP-0 recorded:
+    // that figure included one-time OCCT setup which the session has already
+    // paid by now. Nine milliseconds is too short to tell a free main thread
+    // from a blocked one, so the probes below use genuinely expensive work - an
+    // oblique cut through a large cylinder, and the finest tessellation the app
+    // can ask for.
+    const block = await kernel.createBox({ width: 60, depth: 40, height: 25 });
+    const barrel = await kernel.createCylinder({
+      radius: 80,
+      height: 200,
+      origin: [0, 0, -100],
+    });
+    const oblique = await kernel.createCylinder({
+      radius: 30,
+      height: 300,
+      origin: [-100, -100, -100],
+      axis: [1, 1, 1],
+    });
+
+    // The baseline the two probes below have to be read against: without it,
+    // "6 ms worst stall" could be the kernel's shadow rather than the timer's
+    // own scheduling noise.
+    const idleProbe = await during(
+      'idle baseline',
+      () => new Promise((resolve) => setTimeout(resolve, 150)),
+    );
+
+    const booleanProbe = await during('oblique Boolean', () =>
+      kernel.subtract(barrel, oblique),
+    );
+    const tessellationProbe = await during('fine tessellation', () =>
+      kernel.tessellate(barrel, { linearDeflection: 0.002, angularDeflection: 0.01 }),
+    );
+
+    // --- transferables versus structured cloning ---------------------------
+    //
+    // An echo worker, so the measurement is a real postMessage rather than a
+    // stand-in for one. Payloads are built before the timed loop; a transfer
+    // detaches its source, so each iteration needs its own.
+    const url = URL.createObjectURL(
+      new Blob(['self.onmessage=(e)=>{self.postMessage(e.data.tag)}'], {
+        type: 'text/javascript',
+      }),
+    );
+    const echo = new Worker(url);
+
+    const clonePayload = (mesh, tag) => ({
+      tag,
+      positions: mesh.positions.slice(),
+      normals: mesh.normals.slice(),
+      indices: mesh.indices.slice(),
+    });
+
+    const timeSends = async (mesh, iterations, transfer) => {
+      const payloads = Array.from({ length: iterations }, (_, i) =>
+        clonePayload(mesh, i),
+      );
+      const started = performance.now();
+      for (const payload of payloads) {
+        await new Promise((resolve) => {
+          echo.onmessage = resolve;
+          if (transfer) {
+            echo.postMessage(payload, [
+              payload.positions.buffer,
+              payload.normals.buffer,
+              payload.indices.buffer,
+            ]);
+          } else {
+            echo.postMessage(payload);
+          }
+        });
+      }
+      return Number(((performance.now() - started) / iterations).toFixed(4));
+    };
+
+    const abAt = async (mesh, label, iterations) => {
+      const bytes =
+        mesh.positions.byteLength + mesh.normals.byteLength + mesh.indices.byteLength;
+      // Warm up: the first postMessage of a session pays one-off costs.
+      await timeSends(mesh, 3, true);
+      return {
+        label,
+        bytes,
+        triangles: mesh.indices.length / 3,
+        transferMs: await timeSends(mesh, iterations, true),
+        structuredCloneMs: await timeSends(mesh, iterations, false),
+      };
+    };
+
+    const smallMesh = (await kernel.tessellate(block, { linearDeflection: 0.1 })).mesh;
+    const transferAb = [
+      await abAt(smallMesh, 'demo-scene mesh', 40),
+      await abAt(tessellationProbe.value.mesh, 'fine tessellation', 12),
+    ];
+
+    echo.terminate();
+    URL.revokeObjectURL(url);
+    for (const id of [block, barrel, oblique]) {
+      try {
+        await kernel.release(id);
+      } catch {
+        // already consumed or released; not what is under measurement here
+      }
+    }
+
+    return {
+      responsiveness: [
+        { ...idleProbe, value: undefined },
+        { ...booleanProbe, value: undefined },
+        { ...tessellationProbe, value: undefined },
+      ],
+      transport,
+      transferAb,
+      meshCopy: kernel.operationLog
+        .filter((entry) => entry.transferBytes !== undefined)
+        .map((entry) => ({
+          triangles: entry.triangleCount ?? null,
+          bytes: entry.transferBytes,
+          copyMs: Number((entry.copyMs ?? 0).toFixed(4)),
+        })),
+    };
+  });
+}
+
 async function readReadout(page) {
   return page.evaluate(() => {
     const out = {};
@@ -59,8 +259,17 @@ try {
   browser = await chromium.launch({
     channel: 'chrome',
     headless: !headed,
-    // SwiftShader keeps WebGL working on headless machines without a real GPU.
-    args: ['--enable-unsafe-swiftshader'],
+    args: [
+      // SwiftShader keeps WebGL working on headless machines without a real GPU.
+      '--enable-unsafe-swiftshader',
+      // Headless treats the page as backgrounded and throttles timers to about
+      // one a second. That is fatal to the main-thread responsiveness probe,
+      // which needs the event loop ticking at its normal rate to tell a free
+      // main thread from a blocked one.
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+    ],
   });
 
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -352,12 +561,59 @@ try {
     note(`pixel check skipped (${drawn.reason}); relying on screenshots`);
   }
 
-  const budgetFlags = await page
+  console.log('Measuring the Worker boundary...');
+  const boundary = await measureWorkerBoundary(page);
+
+  const FRAME_MS = 1000 / 60;
+  for (const probe of boundary.responsiveness) {
+    if (probe.mainThread === null || probe.mainThread.count < 5) {
+      throw new Error(
+        `too few main-thread samples during ${probe.label}; the responsiveness ` +
+          'measurement is inconclusive rather than passing',
+      );
+    }
+    note(
+      `${probe.label}: ${probe.wallMs.toFixed(1)} ms wall, ` +
+        `worst main-thread stall ${probe.mainThread.maxMs.toFixed(1)} ms ` +
+        `(median ${probe.mainThread.medianMs.toFixed(1)} ms over ${probe.mainThread.count} samples)`,
+    );
+    // A main thread still running the kernel would stall for roughly the whole
+    // operation, so the two outcomes are far apart; this sits between them with
+    // room for scheduler noise on either side.
+    const ceiling = Math.max(3 * FRAME_MS, probe.wallMs * 0.25);
+    if (probe.mainThread.maxMs > ceiling) {
+      throw new Error(
+        `${probe.label} stalled the main thread for ${probe.mainThread.maxMs.toFixed(1)} ms ` +
+          `(limit ${ceiling.toFixed(1)} ms) - the kernel is not off the main thread`,
+      );
+    }
+  }
+
+  const transportCosts = boundary.transport.map((entry) => entry.transportMs);
+  if (transportCosts.length > 0) {
+    const total = transportCosts.reduce((sum, value) => sum + value, 0);
+    note(
+      `transport overhead across ${transportCosts.length} operations: ` +
+        `${total.toFixed(1)} ms total, worst ${Math.max(...transportCosts).toFixed(1)} ms`,
+    );
+  }
+
+  for (const ab of boundary.transferAb) {
+    note(
+      `${ab.label} (${(ab.bytes / 1024).toFixed(0)} kB): ` +
+        `transfer ${ab.transferMs.toFixed(3)} ms vs clone ${ab.structuredCloneMs.toFixed(3)} ms`,
+    );
+  }
+
+  // Long operations are still reported, but as latency rather than as dropped
+  // frames: with the kernel in a Worker the duration is what the user waits for,
+  // not how long the UI was frozen. Main-thread blocking is measured separately.
+  const latencyFlags = await page
     .locator('#oplog li')
     .evaluateAll((items) =>
-      items.filter((li) => li.textContent?.includes('over frame budget')).length,
+      items.filter((li) => li.textContent?.includes('frame latency')).length,
     );
-  note(`operations flagged over frame budget in the readout: ${budgetFlags}`);
+  note(`operations over a frame of latency in the readout: ${latencyFlags}`);
 
   if (failedRequests.length > 0) {
     note(`failed requests: ${failedRequests.join(', ')}`);
@@ -390,9 +646,24 @@ try {
         afterDemoScene: afterCreate,
         afterSubtract: afterBoolean,
         nonBackgroundFraction: drawn.nonBackgroundFraction ?? null,
-        overBudgetFlagsShown: budgetFlags,
+        latencyFlagsShown: latencyFlags,
         findings,
       },
+      null,
+      2,
+    )}\n`,
+  );
+
+  // The Worker-boundary numbers land in their own file: they answer a different
+  // question from the render-path checks, and MVP-1 will want to track them
+  // across builds the way payload.json tracks size.
+  const boundaryPath = forceWebgl
+    ? 'measurements/worker-webgl2.json'
+    : 'measurements/worker.json';
+  writeFileSync(
+    boundaryPath,
+    `${JSON.stringify(
+      { backend: initial['Backend'], occtVersion: initial['OCCT'], ...boundary },
       null,
       2,
     )}\n`,
@@ -401,7 +672,7 @@ try {
   console.log('\nBrowser verification PASSED');
   console.log('  screenshots: measurements/viewport-*.png');
   console.log(
-    `  measurements: measurements/${forceWebgl ? 'browser-webgl2' : 'browser'}.json`,
+    `  measurements: measurements/${forceWebgl ? 'browser-webgl2' : 'browser'}.json, ${boundaryPath}`,
   );
 } catch (error) {
   exitCode = 1;

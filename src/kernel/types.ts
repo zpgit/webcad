@@ -107,14 +107,14 @@ export interface MeshMeta {
 }
 
 /**
- * Typed-array views over mesh data in WASM linear memory.
+ * Mesh data the caller owns.
  *
- * These are valid ONLY for the duration of the callback that receives them.
- * When WASM memory grows, its backing ArrayBuffer is detached and every existing
- * view becomes unusable - so a stored view is a latent crash, not a stale value.
- * Copy out or upload to the GPU before returning.
+ * These are copies made kernel-side and handed over, never views into WASM
+ * linear memory: the module lives behind the transport, so nothing on this side
+ * can alias its heap. They stay valid for as long as the caller keeps them,
+ * including across operations that grow WASM memory.
  */
-export interface MeshViews {
+export interface MeshBuffers {
   readonly positions: Float32Array;
   readonly normals: Float32Array;
   readonly indices: Uint32Array;
@@ -132,9 +132,23 @@ export interface KernelStats {
 /** One entry in the operation log. Recorded for failures as well as successes. */
 export interface OperationRecord {
   readonly operation: string;
+  /**
+   * Kernel-side execution time: the OCCT work itself, measured where the module
+   * lives. Deliberately not the caller's round trip - see `roundTripMs`.
+   */
   readonly durationMs: number;
   readonly status: number;
   readonly wasmMemoryBytes: number;
   /** Present when the operation produced or consumed a mesh. */
   readonly triangleCount?: number;
+  /**
+   * Round trip as the caller observed it. `roundTripMs - durationMs` is what
+   * hosting the kernel off the main thread costs, which is the figure this
+   * stage exists to produce rather than assume.
+   */
+  readonly roundTripMs?: number;
+  /** Mesh bytes moved across the boundary, when the operation moved any. */
+  readonly transferBytes?: number;
+  /** Cost of copying a mesh out of WASM memory into transferable buffers. */
+  readonly copyMs?: number;
 }

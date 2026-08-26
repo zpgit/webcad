@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-import type { BodyId, MeshMeta, MeshViews } from '../kernel/types.ts';
+import type { BodyId, MeshBuffers, MeshMeta } from '../kernel/types.ts';
 
 export type RenderBackend = 'webgpu' | 'webgl2';
 
@@ -94,27 +94,18 @@ export class Viewport {
   /**
    * Uploads a tessellation into GPU buffers.
    *
-   * Must be called synchronously with views obtained from
-   * `Kernel.withTessellation`: the typed arrays address WASM linear memory, and
-   * growing that memory detaches the backing ArrayBuffer. The copy into
-   * BufferAttribute happens here, inside that synchronous window, and no view is
-   * retained afterwards.
+   * The arrays are adopted, not copied. They arrive already owned by this
+   * thread - the kernel copied them out of WASM memory and transferred them -
+   * so copying again would put back the copy the transfer removed. The caller
+   * hands over ownership by calling this; it must not keep writing to them.
    */
-  upsertBody(bodyId: BodyId, views: MeshViews, meta: MeshMeta): void {
+  upsertBody(bodyId: BodyId, buffers: MeshBuffers, meta: MeshMeta): void {
     this.removeBody(bodyId);
 
     const geometry = new THREE.BufferGeometry();
-    // `new Float32Array(view)` copies out of WASM memory. Passing the view
-    // directly would hand three.js a reference that dies on the next growth.
-    geometry.setAttribute(
-      'position',
-      new THREE.BufferAttribute(new Float32Array(views.positions), 3),
-    );
-    geometry.setAttribute(
-      'normal',
-      new THREE.BufferAttribute(new Float32Array(views.normals), 3),
-    );
-    geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(views.indices), 1));
+    geometry.setAttribute('position', new THREE.BufferAttribute(buffers.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(buffers.normals, 3));
+    geometry.setIndex(new THREE.BufferAttribute(buffers.indices, 1));
     geometry.computeBoundingSphere();
 
     const material = new THREE.MeshStandardMaterial({
