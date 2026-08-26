@@ -39,9 +39,25 @@ export type KernelRequest =
   | { readonly kind: 'release'; readonly bodyId: number }
   | { readonly kind: 'bodyInfo'; readonly bodyId: number }
   | { readonly kind: 'faceTypeSummary'; readonly bodyId: number }
+  | { readonly kind: 'serialize'; readonly bodyIds: readonly number[] }
+  | { readonly kind: 'restore'; readonly payload: Uint8Array }
   | { readonly kind: 'stats' };
 
 export type RequestKind = KernelRequest['kind'];
+
+/**
+ * Buffers whose ownership moves to the handler with the request.
+ *
+ * Derived here rather than assembled by callers, so the inbound direction
+ * cannot be given a payload and silently forget to transfer it. Every transport
+ * asks the same question of the same function, which is what keeps the
+ * in-process path honest about ownership rather than merely permissive.
+ */
+export function requestTransferables(request: KernelRequest): Transferable[] {
+  return request.kind === 'restore'
+    ? [request.payload.buffer as ArrayBuffer]
+    : [];
+}
 
 /** Build constants, read once during the handshake and cached by the caller. */
 export interface InitResult {
@@ -75,6 +91,24 @@ export interface MeshResult {
   readonly meta: MeshMeta;
 }
 
+/**
+ * An exact B-Rep payload, owned by the receiver and transferred to it.
+ *
+ * Unlike a mesh, these bytes ARE the geometry - which is why they are opaque.
+ * Nothing outside the kernel parses them; the document layer stores them,
+ * measures them, and hands them back.
+ */
+export interface SerializeResult {
+  readonly bytes: Uint8Array;
+  readonly bodyCount: number;
+  readonly format: string;
+  readonly occtVersion: string;
+}
+
+export interface RestoreResult {
+  readonly bodyIds: readonly number[];
+}
+
 /** Result type per request kind, so the proxy is checked rather than cast. */
 export interface KernelResults {
   init: InitResult;
@@ -85,6 +119,8 @@ export interface KernelResults {
   release: null;
   bodyInfo: BodyInfo;
   faceTypeSummary: FaceTypeSummary;
+  serialize: SerializeResult;
+  restore: RestoreResult;
   stats: KernelStats;
 }
 

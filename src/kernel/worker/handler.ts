@@ -68,6 +68,10 @@ export class KernelHandler {
         return this.#bodyInfo(request.bodyId);
       case 'faceTypeSummary':
         return this.#faceTypeSummary(request.bodyId);
+      case 'serialize':
+        return this.#serialize(request.bodyIds);
+      case 'restore':
+        return this.#restore(request.payload);
       case 'stats':
         return { value: this.#require('stats').stats(), transfer: [] };
     }
@@ -320,6 +324,110 @@ export class KernelHandler {
     }
     const { status: _s, message: _m, ...counts } = raw;
     return { value: counts, transfer: [] };
+  }
+
+  /**
+   * Serializes bodies and copies the payload into a buffer the caller will own.
+   *
+   * Same discipline as tessellation: the copy out of WASM memory happens in one
+   * synchronous block, is timed, and its size is recorded. What differs is what
+   * is being copied - these bytes are exact geometry rather than a rendering of
+   * it, so they are handed over opaque and nothing on this side parses them.
+   */
+  #serialize(bodyIds: readonly number[]): HandlerOutcome {
+    const mod = this.#require('serialize');
+
+    // embind allocates the vector in WASM memory and frees nothing implicitly,
+    // so it is released on every path out of here, failures included.
+    const list = new mod.BodyIdList();
+    let result;
+    try {
+      for (const id of bodyIds) list.push_back(id);
+      result = this.#timed('serialize', () => mod.serializeBodies(list));
+    } finally {
+      list.delete();
+    }
+
+    if (result.status !== Status.Ok) {
+      throwForStatus(result.status, result.message, 'serialize');
+    }
+
+    const copyStarted = performance.now();
+    const bytes = mod.HEAPU8.slice(
+      result.dataPtr,
+      result.dataPtr + result.byteLength,
+    );
+    const copyMs = performance.now() - copyStarted;
+
+    // The kernel would otherwise hold a checkpoint-sized allocation for the
+    // rest of the session, having already handed the caller its own copy.
+    mod.discardStaging();
+
+    this.#annotateRecord({ copyMs, transferBytes: bytes.byteLength });
+
+    return {
+      value: {
+        bytes,
+        bodyCount: result.bodyCount,
+        format: result.format,
+        occtVersion: result.occtVersion,
+      },
+      transfer: [bytes.buffer as ArrayBuffer],
+    };
+  }
+
+  /**
+   * Restores bodies from a payload the caller handed over.
+   *
+   * The first request that carries bytes INTO the kernel. Staging and the write
+   * into WASM memory sit inside the timed region because they are part of what
+   * restoring costs; the write itself is timed separately so the two are not
+   * conflated.
+   */
+  #restore(payload: Uint8Array): HandlerOutcome {
+    const mod = this.#require('restore');
+
+    if (payload.byteLength === 0) {
+      throw new InvalidParameterError('payload is empty', 'restore');
+    }
+
+    let copyMs = 0;
+    const result = this.#timed('restore', () => {
+      const staged = mod.reserveStaging(payload.byteLength);
+      if (staged.status !== Status.Ok) {
+        return {
+          status: staged.status,
+          message: staged.message,
+          firstBodyId: 0,
+          bodyCount: 0,
+        };
+      }
+
+      // The view is taken after reserveStaging, never before: reserving can
+      // grow the heap, and growth detaches every existing view.
+      const copyStarted = performance.now();
+      mod.HEAPU8.set(payload, staged.dataPtr);
+      copyMs = performance.now() - copyStarted;
+
+      return mod.restoreBodies();
+    });
+
+    mod.discardStaging();
+
+    if (result.status !== Status.Ok) {
+      throwForStatus(result.status, result.message, 'restore');
+    }
+
+    this.#annotateRecord({ copyMs, transferBytes: payload.byteLength });
+
+    // Consecutive by construction and verified kernel-side, so position i in
+    // the payload is firstBodyId + i. Expanded here so the protocol reports
+    // handles rather than an encoding of them.
+    const bodyIds = Array.from(
+      { length: result.bodyCount },
+      (_, i) => result.firstBodyId + i,
+    );
+    return { value: { bodyIds }, transfer: [] };
   }
 
   // --- Internals -----------------------------------------------------------

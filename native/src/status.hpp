@@ -121,6 +121,60 @@ struct MeshResult {
   bool fromCache = false;
 };
 
+// A byte payload staged in WASM memory for crossing the boundary.
+//
+// The kernel owns exactly one staging buffer at a time, in both directions: a
+// serialization writes into it and JavaScript copies out; a restoration has
+// JavaScript write into it and the kernel reads. The buffer stays valid until
+// the next staging call or an explicit discard.
+//
+// As with MeshResult, dataPtr is a byte offset into WASM linear memory and any
+// JavaScript view over it MUST NOT be stored. Reserving a buffer can itself
+// grow the heap, which detaches every existing view, so a caller must take its
+// view after the call that hands it the offset - never before.
+struct StagingResult {
+  int32_t status = static_cast<int32_t>(Status::Ok);
+  std::string message;
+
+  uint32_t dataPtr = 0;
+  uint32_t byteLength = 0;
+};
+
+// Result of serializing bodies to an exact B-Rep payload.
+//
+// The bytes are exact geometry, not a mesh, and they are opaque: JavaScript may
+// store, measure, and hand them back, but nothing outside the kernel parses
+// them. The encoding and the OCCT version that wrote it are reported rather
+// than left to be inferred, so a document can record both and a later reader
+// never has to sniff the format.
+struct SerializeResult {
+  int32_t status = static_cast<int32_t>(Status::Ok);
+  std::string message;
+
+  // Valid until the next staging call or discardStaging().
+  uint32_t dataPtr = 0;
+  uint32_t byteLength = 0;
+
+  uint32_t bodyCount = 0;
+
+  std::string format;
+  std::string occtVersion;
+};
+
+// Result of restoring bodies from a payload.
+//
+// Handles are reported as a first identifier and a count rather than a list,
+// because the registry issues them consecutively and in the order the payload
+// stores them. restoreBodies verifies that rather than trusting it, so the
+// caller can rely on bodyId = firstBodyId + i addressing the i-th body.
+struct RestoreResult {
+  int32_t status = static_cast<int32_t>(Status::Ok);
+  std::string message;
+
+  uint32_t firstBodyId = 0;
+  uint32_t bodyCount = 0;
+};
+
 // Kernel-wide statistics.
 struct KernelStats {
   uint32_t liveBodyCount = 0;

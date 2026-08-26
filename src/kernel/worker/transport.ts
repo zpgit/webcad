@@ -6,11 +6,19 @@
 // minus the postMessage. The one thing it cannot exercise is serialization, so
 // the browser verification run, not the Node suite, is the authority on the
 // boundary itself.
+//
+// One exception to that, added when payloads started crossing inbound: a
+// request carrying transferable buffers IS structurally cloned here, because
+// otherwise the in-process path would hand the handler the caller's own array
+// and leave the caller still holding a usable reference to it. That is a laxer
+// contract than the Worker's, and a test passing under it would say nothing
+// about the path that ships.
 
 import { KernelTerminatedError, toFailure } from '../errors.ts';
 import type { KernelModuleFactory } from '../wasm-module.ts';
 import { KernelHandler, serve } from './handler.ts';
 import type { KernelEnvelope, KernelResponse } from './protocol.ts';
+import { requestTransferables } from './protocol.ts';
 
 export interface Transport {
   /** Sends one request and resolves with its response. Never rejects. */
@@ -56,7 +64,14 @@ export class InProcessTransport implements Transport {
       });
     }
 
-    const served = this.#queue.then(() => serve(this.#handler, envelope));
+    // Detaches the caller's buffers exactly as postMessage would, and gives the
+    // handler its own copy. Applied only when there is something to transfer,
+    // so the cost falls on the one request kind that carries a payload.
+    const transfer = requestTransferables(envelope.request);
+    const delivered =
+      transfer.length === 0 ? envelope : structuredClone(envelope, { transfer });
+
+    const served = this.#queue.then(() => serve(this.#handler, delivered));
     this.#queue = served.catch(() => undefined);
     return served.then(({ response }) => response);
   }

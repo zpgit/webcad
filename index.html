@@ -12,7 +12,18 @@
       <canvas id="viewport"></canvas>
 
       <aside id="panel">
-        <h1>Web CAD <span class="stage">MVP-0</span></h1>
+        <h1>Web CAD <span class="stage">MVP-1</span></h1>
+
+        <section>
+          <h2>Document</h2>
+          <input id="doc-name" type="text" aria-label="Document name" />
+          <div class="row">
+            <button id="btn-save" type="button">Save</button>
+            <button id="btn-new" type="button">New</button>
+          </div>
+          <p class="hint" id="doc-status"></p>
+          <ul id="doc-list"></ul>
+        </section>
 
         <section>
           <h2>Create</h2>
@@ -49,6 +60,14 @@
         <section>
           <h2>Operation log</h2>
           <ol id="oplog"></ol>
+        </section>
+
+        <!-- The document's construction record. Inert: it is written, read
+             back, and shown, and nothing replays it. Displayed so the metadata
+             has a human reader until MVP-4 gives it a real consumer. -->
+        <section>
+          <h2>History</h2>
+          <ol id="history"></ol>
         </section>
       </aside>
     </div>

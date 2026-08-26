@@ -5,6 +5,14 @@
 // facts cross as scalars and counts, and mesh data crosses as byte offsets into
 // WASM linear memory. There is deliberately no operation that takes mesh
 // buffers as geometric input - mesh is derived output only.
+//
+// Serialization is the one place exact geometry leaves WASM, and it leaves as
+// opaque bytes: a payload JavaScript may store, measure, and hand back, but
+// which nothing outside the kernel parses. There is deliberately no operation
+// that decodes a payload into anything a caller can inspect, so the bytes
+// cannot become a second geometry representation.
+
+#include <vector>
 
 #include <emscripten/bind.h>
 
@@ -67,6 +75,27 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("angularDeflection", &MeshResult::angularDeflection)
       .field("fromCache", &MeshResult::fromCache);
 
+  value_object<StagingResult>("StagingResult")
+      .field("status", &StagingResult::status)
+      .field("message", &StagingResult::message)
+      .field("dataPtr", &StagingResult::dataPtr)
+      .field("byteLength", &StagingResult::byteLength);
+
+  value_object<SerializeResult>("SerializeResult")
+      .field("status", &SerializeResult::status)
+      .field("message", &SerializeResult::message)
+      .field("dataPtr", &SerializeResult::dataPtr)
+      .field("byteLength", &SerializeResult::byteLength)
+      .field("bodyCount", &SerializeResult::bodyCount)
+      .field("format", &SerializeResult::format)
+      .field("occtVersion", &SerializeResult::occtVersion);
+
+  value_object<RestoreResult>("RestoreResult")
+      .field("status", &RestoreResult::status)
+      .field("message", &RestoreResult::message)
+      .field("firstBodyId", &RestoreResult::firstBodyId)
+      .field("bodyCount", &RestoreResult::bodyCount);
+
   value_object<KernelStats>("KernelStats")
       .field("liveBodyCount", &KernelStats::liveBodyCount)
       .field("totalBodiesCreated", &KernelStats::totalBodiesCreated)
@@ -103,6 +132,11 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("linearDeflection", &TessellationParams::linearDeflection)
       .field("angularDeflection", &TessellationParams::angularDeflection);
 
+  // The order of this list is the order bodies are written into a checkpoint,
+  // and it is the caller's to decide: the registry stores shapes unordered, so
+  // there is no kernel-side ordering a document could pin its identities to.
+  register_vector<uint32_t>("BodyIdList");
+
   // --- Operations ----------------------------------------------------------
 
   function("createBox", &createBox);
@@ -112,6 +146,11 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
   function("releaseBody", &releaseBody);
   function("bodyInfo", &bodyInfo);
   function("faceTypeSummary", &faceTypeSummary);
+  function("serializeBodies", &serializeBodies);
+  function("reserveStaging", &reserveStaging);
+  function("restoreBodies", &restoreBodies);
+  function("discardStaging", &discardStaging);
+  function("geometryFormat", &geometryFormat);
   function("stats", &stats);
   function("occtVersion", &occtVersion);
 

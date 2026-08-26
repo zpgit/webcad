@@ -120,6 +120,26 @@ export interface MeshBuffers {
   readonly indices: Uint32Array;
 }
 
+/**
+ * Exact B-Rep, serialized.
+ *
+ * The one form in which exact geometry leaves WASM, and it leaves opaque: store
+ * these bytes, measure them, hash them, hand them back to `restore` - but do
+ * not parse them. Parsing would mean a second geometry representation living
+ * outside the kernel, which is the thing the whole boundary exists to prevent.
+ *
+ * `format` and `occtVersion` describe what wrote the payload. They are reported
+ * rather than left to be inferred so a document can record both, and so a
+ * failure to read a payload written by a different build is attributable
+ * instead of mysterious.
+ */
+export interface BrepPayload {
+  readonly bytes: Uint8Array;
+  readonly bodyCount: number;
+  readonly format: string;
+  readonly occtVersion: string;
+}
+
 export interface KernelStats {
   readonly liveBodyCount: number;
   readonly totalBodiesCreated: number;
@@ -147,8 +167,14 @@ export interface OperationRecord {
    * stage exists to produce rather than assume.
    */
   readonly roundTripMs?: number;
-  /** Mesh bytes moved across the boundary, when the operation moved any. */
+  /**
+   * Bytes moved across the boundary, when the operation moved any: a mesh
+   * coming out, or a serialized payload going either way.
+   */
   readonly transferBytes?: number;
-  /** Cost of copying a mesh out of WASM memory into transferable buffers. */
+  /**
+   * Cost of the copy between WASM memory and a transferable buffer - out of it
+   * for a mesh or a serialization, into it for a restoration.
+   */
   readonly copyMs?: number;
 }

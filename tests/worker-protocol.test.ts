@@ -38,10 +38,12 @@ class FakeWorker {
   onmessageerror: (() => void) | null = null;
 
   readonly received: KernelEnvelope[] = [];
+  readonly transferred: (readonly Transferable[])[] = [];
   terminated = false;
 
-  postMessage(envelope: KernelEnvelope): void {
+  postMessage(envelope: KernelEnvelope, transfer: readonly Transferable[] = []): void {
     this.received.push(envelope);
+    this.transferred.push(transfer);
   }
 
   terminate(): void {
@@ -119,6 +121,39 @@ test('settled requests are not retained', async () => {
   // Nothing is left to leak: a dead transport has no one to notify.
   transport.dispose();
   assert.equal(worker.terminated, true);
+});
+
+// --- Inbound transfer ---------------------------------------------------------
+
+/**
+ * A payload sent into the Worker moves rather than clones.
+ *
+ * Mesh has always been transferred coming back; this is the first request that
+ * carries bytes the other way. Asserted at the transport rather than end to
+ * end, because a missing transfer list is invisible from the outside - the
+ * request still works, it just quietly copies a checkpoint on every restore.
+ */
+test('a restore request lists its payload as transferable', async () => {
+  const worker = new FakeWorker();
+  const transport = transportWith(worker);
+
+  const payload = new Uint8Array([1, 2, 3, 4]);
+  const pending = transport.send({ id: 1, request: { kind: 'restore', payload } });
+  worker.reply(1, { bodyIds: [] });
+  await pending;
+
+  assert.deepEqual(worker.transferred[0], [payload.buffer]);
+});
+
+test('requests without a payload transfer nothing', async () => {
+  const worker = new FakeWorker();
+  const transport = transportWith(worker);
+
+  const pending = transport.send(envelope(1));
+  worker.reply(1, null);
+  await pending;
+
+  assert.deepEqual(worker.transferred[0], []);
 });
 
 // --- Host death -------------------------------------------------------------

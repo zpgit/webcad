@@ -9,6 +9,7 @@ import type {
   BooleanKind,
   BooleanOutcome,
   BoxOptions,
+  BrepPayload,
   CylinderOptions,
   FaceTypeSummary,
   KernelStats,
@@ -27,6 +28,8 @@ import type {
   KernelRequest,
   MeshResult,
   ResponseTail,
+  RestoreResult,
+  SerializeResult,
 } from './worker/protocol.ts';
 import { InProcessTransport, type Transport } from './worker/transport.ts';
 import { WorkerTransport } from './worker/worker-transport.ts';
@@ -241,6 +244,49 @@ export class Kernel {
       options,
     });
     return { mesh: result.mesh, meta: result.meta };
+  }
+
+  // --- Serialization -------------------------------------------------------
+
+  /**
+   * Writes the given bodies, in the order given, into one exact B-Rep payload.
+   *
+   * The order is yours to choose and yours to remember: `restore` returns
+   * handles in the same order, and that correspondence is the only thing tying
+   * a persisted body back to whatever identity a document gave it. Handles
+   * themselves cannot be persisted - they are indices into a live registry and
+   * mean nothing once this kernel is gone.
+   *
+   * The payload is exact geometry, and it is opaque. Store it, measure it, hash
+   * it, hand it back; do not parse it.
+   */
+  async serialize(bodyIds: readonly BodyId[]): Promise<BrepPayload> {
+    this.#require('serialize');
+    return this.#dispatch<SerializeResult>({
+      kind: 'serialize',
+      bodyIds: [...bodyIds],
+    });
+  }
+
+  /**
+   * Restores bodies from a payload, issuing a fresh handle for each.
+   *
+   * All-or-nothing: a payload that cannot be read in full yields no handles at
+   * all, and the kernel remains usable.
+   *
+   * **The payload's buffer is transferred and becomes unusable here.** It is
+   * moved into the kernel rather than copied, so the caller's `Uint8Array` is
+   * detached when this returns - along with any other view over the same
+   * `ArrayBuffer`. A caller that needs to keep the bytes, to save them as well
+   * as restore them, must copy first.
+   */
+  async restore(payload: Uint8Array): Promise<BodyId[]> {
+    this.#require('restore');
+    const result = await this.#dispatch<RestoreResult>({
+      kind: 'restore',
+      payload,
+    });
+    return result.bodyIds.map(asBodyId);
   }
 
   // --- Lifetime and inspection --------------------------------------------

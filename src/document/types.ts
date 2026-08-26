@@ -1,0 +1,158 @@
+// The native document: a versioned container of named parts.
+//
+// The architecture note is explicit that the document format is a container and
+// that B-Rep serialization is one payload within it (note section 3-4). That
+// distinction is load-bearing here: nothing in this file knows what the
+// geometry part contains, and nothing may parse it. The container's job is part
+// names, versions, identity, and integrity.
+//
+// It is also explicitly NOT STEP. Saving does not pass geometry through an
+// interchange schema; STEP is an export concern and arrives in MVP-2.
+
+import type { BooleanKind, BoxOptions, CylinderOptions } from '../kernel/types.ts';
+
+/**
+ * The container format's version.
+ *
+ * A build refuses any version it has no reader for, rather than parsing a
+ * future document on a best-effort basis. Note that this versions the
+ * *container*, not the geometry encoding inside it and not the OCCT build that
+ * wrote it - those are recorded separately and treated differently.
+ */
+export const SCHEMA_VERSION = 1;
+
+/**
+ * Part names, which double as file names for a store that has files.
+ *
+ * Taken from the layout the architecture note recommends. `topology.bin` and
+ * `preview.glb` appear there too and are deliberately absent: there is no
+ * persistent identity mapping to write yet (MVP-4), and a persisted preview
+ * mesh would hide re-tessellation from the recovery measurement this stage
+ * exists to take.
+ */
+export const PART_NAMES = ['manifest.json', 'features.json', 'geometry.brep'] as const;
+
+export type PartName = (typeof PART_NAMES)[number];
+
+/**
+ * A document as bytes: named parts, each readable without parsing the others.
+ *
+ * Uniformly bytes so that a store can persist them without knowing which are
+ * text and which are binary - an IndexedDB record field and an OPFS file are
+ * both just bytes - and so a round trip can be asserted byte-identical.
+ */
+export type DocumentParts = Readonly<Record<PartName, Uint8Array>>;
+
+declare const bodyRefBrand: unique symbol;
+
+/**
+ * A body's identity within a document. Stable across save and open.
+ *
+ * Kernel `BodyId` handles cannot serve: they are indices into a live registry
+ * and mean nothing once the Worker is gone. So a document mints its own,
+ * records the order they appear in the checkpoint, and rebinds them to fresh
+ * handles on open.
+ *
+ * This is identity for a BODY. It is not extended to a face, an edge, or a
+ * vertex, and it is not a step toward persistent naming - section 7 of the
+ * architecture note rules out positional sub-entity references, and MVP-4 still
+ * faces that problem whole.
+ */
+export type BodyRef = string & { readonly [bodyRefBrand]: true };
+
+export function asBodyRef(raw: string): BodyRef {
+  return raw as BodyRef;
+}
+
+/** Mints `b1`, `b2`, ... - deterministic, so a saved document is diffable. */
+export function bodyRefFor(ordinal: number): BodyRef {
+  return asBodyRef(`b${ordinal}`);
+}
+
+export interface GeometryIntegrity {
+  /** Length of the geometry payload, checked before it reaches the kernel. */
+  readonly byteLength: number;
+  /**
+   * CRC-32 of the payload, as eight lowercase hex digits.
+   *
+   * Corruption detection, not tamper resistance: the failure being guarded
+   * against is a torn write or a truncated read, and a document that has been
+   * deliberately edited is out of scope for a browser-local store.
+   */
+  readonly checksum: string;
+}
+
+export interface KernelProvenance {
+  /** The OCCT build that wrote the geometry payload. */
+  readonly occtVersion: string;
+  /** The payload's encoding, so a reader never has to sniff it. */
+  readonly geometryFormat: string;
+}
+
+export interface DocumentManifest {
+  readonly schemaVersion: number;
+  readonly documentId: string;
+  readonly name: string;
+  /**
+   * The unit the document's numbers are expressed in.
+   *
+   * Declared and never converted. The kernel is unitless - MVP-0 numbers are
+   * bare doubles - so this exists to stop a document being silently
+   * unit-ambiguous, and to give STEP import in MVP-2 a field to disagree with
+   * rather than a convention to discover.
+   */
+  readonly units: 'mm';
+  readonly createdAt: string;
+  readonly modifiedAt: string;
+  readonly kernel: KernelProvenance;
+  readonly geometry: GeometryIntegrity;
+  /**
+   * Body identities, ordered by their position in the checkpoint.
+   *
+   * This array IS the mapping from checkpoint position to identity. It is
+   * written down rather than left implicit in iteration order, because a
+   * disagreement between it and the payload must be detectable: the count is
+   * checked on open and a mismatch refuses the document.
+   */
+  readonly bodies: readonly BodyRef[];
+  /**
+   * The next ordinal to mint.
+   *
+   * Persisted rather than derived from `bodies.length`, because identities are
+   * never reused: deleting `b1` from a two-body document and adding another
+   * would otherwise mint `b2` a second time.
+   */
+  readonly nextBodyOrdinal: number;
+}
+
+/**
+ * One step in how the document's bodies came to exist.
+ *
+ * Inert. Written, read back, and displayable; never executed. Restoration comes
+ * from the checkpoint alone. Replay would need stable references to faces and
+ * edges across topology changes, which is MVP-4's entire subject and the note's
+ * known hard problem - so this records history without claiming to reproduce
+ * it.
+ *
+ * Not to be confused with the kernel's `OperationRecord`, which is per-operation
+ * timing for the measurement readout and is session-scoped telemetry.
+ */
+export type ConstructionEntry =
+  | { readonly op: 'createBox'; readonly produces: BodyRef; readonly params: BoxOptions }
+  | {
+      readonly op: 'createCylinder';
+      readonly produces: BodyRef;
+      readonly params: CylinderOptions;
+    }
+  | {
+      readonly op: 'boolean';
+      readonly kind: BooleanKind;
+      readonly target: BodyRef;
+      readonly tool: BodyRef;
+      readonly produces: BodyRef;
+    }
+  | { readonly op: 'release'; readonly body: BodyRef };
+
+export interface ConstructionRecord {
+  readonly entries: readonly ConstructionEntry[];
+}

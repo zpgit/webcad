@@ -518,6 +518,89 @@ try {
       : 'measurements/viewport-after-subtract.png',
   });
 
+  // A checkpoint round trip across the real Worker.
+  //
+  // The Node suite drives the same handler in process, where a "transferred"
+  // buffer never crosses a thread and a missing transfer list is invisible.
+  // This is correctness only - throughput and recovery cost belong to the
+  // document stage, which has somewhere to put them.
+  const roundTrip = await page.evaluate(async (bodyId) => {
+    const { kernel } = window.__webcad;
+    const before = await kernel.bodyInfo(bodyId);
+    const beforeFaces = await kernel.faceTypeSummary(bodyId);
+
+    const payload = await kernel.serialize([bodyId]);
+    const size = payload.bytes.byteLength;
+    const restored = await kernel.restore(payload.bytes);
+
+    const after = await kernel.bodyInfo(restored[0]);
+    const afterFaces = await kernel.faceTypeSummary(restored[0]);
+    await kernel.release(restored[0]);
+
+    return {
+      size,
+      format: payload.format,
+      // Zero once the buffer has moved into the Worker. A clone would leave it
+      // readable here, which is the failure this exists to catch.
+      remainingBytes: payload.bytes.byteLength,
+      before,
+      after,
+      volumeError: Math.abs(after.volume - before.volume),
+      surfacesMatch: JSON.stringify(afterFaces) === JSON.stringify(beforeFaces),
+      cylinders: afterFaces.cylinder,
+    };
+  }, resultInfo.bodyId);
+
+  note(
+    `checkpoint round trip: ${roundTrip.size} bytes (${roundTrip.format}), ` +
+      `volume error ${roundTrip.volumeError.toExponential(1)}, ` +
+      `${roundTrip.cylinders} analytic cylinder preserved`,
+  );
+  if (roundTrip.remainingBytes !== 0) {
+    throw new Error(
+      'the restore payload was cloned rather than transferred into the worker',
+    );
+  }
+  if (roundTrip.volumeError > 1e-6) {
+    throw new Error('a checkpoint round trip did not preserve the geometry');
+  }
+  if (!roundTrip.surfacesMatch || roundTrip.cylinders !== 1) {
+    throw new Error(
+      'a checkpoint round trip did not preserve exact analytic surfaces',
+    );
+  }
+  for (const key of ['faceCount', 'edgeCount', 'vertexCount', 'solidCount', 'isValid', 'isClosed']) {
+    if (roundTrip.before[key] !== roundTrip.after[key]) {
+      throw new Error(
+        `a checkpoint round trip changed ${key}: ` +
+          `${roundTrip.before[key]} -> ${roundTrip.after[key]}`,
+      );
+    }
+  }
+
+  // The bounding box legitimately differs, and it is the restored body that is
+  // right. BRepBndLib uses a face's triangulation when it has one, so a
+  // displayed body reports a box inflated by roughly the mesh deflection; a
+  // restored body has no triangulation yet and reports the exact extents. The
+  // check is therefore against the block's true size rather than against what
+  // the body reported before saving.
+  const exact = { min: [-30, -20, 0], max: [30, 20, 25] };
+  const boxError = Math.max(
+    ...['min', 'max'].flatMap((end) =>
+      roundTrip.after.boundingBox[end].map((v, i) => Math.abs(v - exact[end][i])),
+    ),
+  );
+  const inflation = Math.abs(roundTrip.before.boundingBox.max[0] - exact.max[0]);
+  note(
+    `restored bounds are exact to ${boxError.toExponential(1)}; ` +
+      `the tessellated body reported them inflated by ${inflation.toFixed(4)}`,
+  );
+  if (boxError > 1e-6) {
+    throw new Error(
+      `restored geometry has the wrong extents, off by ${boxError.toExponential(1)}`,
+    );
+  }
+
   // Confirms something was actually drawn: an all-background image would mean
   // the upload or the render loop silently did nothing.
   const canvasShot = (await page.locator('#viewport').screenshot()).toString('base64');
@@ -604,6 +687,118 @@ try {
         `transfer ${ab.transferMs.toFixed(3)} ms vs clone ${ab.structuredCloneMs.toFixed(3)} ms`,
     );
   }
+
+  // Save, reload, and see the model come back.
+  //
+  // This is MVP-1's actual question, and it can only be asked of a real browser
+  // that has really been restarted: everything up to here proves the pieces
+  // work in one page's lifetime, which is exactly what a reload invalidates.
+  //
+  // It runs last because it navigates away, discarding the session every check
+  // above depends on.
+  console.log('Saving and reopening after a reload...');
+
+  const beforeReload = await page.evaluate(async () => {
+    const { session, kernel } = window.__webcad;
+
+    session.rename('Verification');
+    const bodies = session.document.bodies;
+    const infos = [];
+    for (const { ref, handle } of bodies) {
+      const info = await kernel.bodyInfo(handle);
+      infos.push({ ref, volume: info.volume, faceCount: info.faceCount });
+    }
+
+    const summary = await session.save();
+    return { infos, summary, historyLength: session.document.entries.length };
+  });
+
+  note(
+    `saved “${beforeReload.summary.name}”: ${beforeReload.infos.length} ` +
+      `${beforeReload.infos.length === 1 ? 'body' : 'bodies'}, ` +
+      `${(beforeReload.summary.byteLength / 1024).toFixed(1)} kB, ` +
+      `${beforeReload.historyLength} history entries`,
+  );
+  if (beforeReload.infos.length === 0) {
+    throw new Error('nothing was saved - the session held no bodies');
+  }
+
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForFunction(
+    () => window.__webcad?.kernel?.isReady === true,
+    { timeout: 60_000 },
+  );
+  // Restoration is awaited during startup, so by the time the handle exists the
+  // document is either open or the failure has been reported on the page.
+  await page.waitForFunction(
+    () => (window.__webcad?.session?.document?.bodies.length ?? 0) > 0,
+    { timeout: 60_000 },
+  );
+
+  const afterReload = await page.evaluate(async () => {
+    const { session, kernel, viewport } = window.__webcad;
+    const infos = [];
+    for (const { ref, handle } of session.document.bodies) {
+      const info = await kernel.bodyInfo(handle);
+      infos.push({ ref, volume: info.volume, faceCount: info.faceCount });
+    }
+    return {
+      name: session.document.name,
+      infos,
+      historyLength: session.document.entries.length,
+      triangles: viewport.totalTriangles,
+      status: document.getElementById('doc-status')?.textContent ?? '',
+    };
+  });
+
+  note(
+    `reopened “${afterReload.name}”: ${afterReload.infos.length} ` +
+      `${afterReload.infos.length === 1 ? 'body' : 'bodies'}, ` +
+      `${afterReload.triangles} triangles re-tessellated, ` +
+      `${afterReload.historyLength} history entries`,
+  );
+
+  if (afterReload.name !== beforeReload.summary.name) {
+    throw new Error(
+      `the reopened document is named "${afterReload.name}", not ` +
+        `"${beforeReload.summary.name}"`,
+    );
+  }
+  if (afterReload.infos.length !== beforeReload.infos.length) {
+    throw new Error(
+      `reopened ${afterReload.infos.length} bodies, saved ${beforeReload.infos.length}`,
+    );
+  }
+  if (afterReload.historyLength !== beforeReload.historyLength) {
+    throw new Error('the construction record did not survive the reload');
+  }
+  if (afterReload.triangles === 0) {
+    throw new Error('the restored document rendered nothing');
+  }
+
+  for (const [index, after] of afterReload.infos.entries()) {
+    const before = beforeReload.infos[index];
+    // Identity is the point: a body must come back as the same body, not merely
+    // as a body of the same size.
+    if (after.ref !== before.ref) {
+      throw new Error(
+        `body ${index} came back as ${after.ref}, was ${before.ref} - ` +
+          'document identity did not survive the restart',
+      );
+    }
+    const error = Math.abs(after.volume - before.volume);
+    if (error > 1e-6 || after.faceCount !== before.faceCount) {
+      throw new Error(
+        `${after.ref} changed across the restart: volume off by ${error.toExponential(1)}, ` +
+          `${before.faceCount} faces -> ${after.faceCount}`,
+      );
+    }
+  }
+  note(
+    `every body returned with its identity and exact geometry (${afterReload.infos
+      .map((b) => b.ref)
+      .join(', ')})`,
+  );
 
   // Long operations are still reported, but as latency rather than as dropped
   // frames: with the kernel in a Worker the duration is what the user waits for,

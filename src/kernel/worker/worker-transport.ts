@@ -1,5 +1,6 @@
 import { KernelTerminatedError, toFailure } from '../errors.ts';
 import type { KernelEnvelope, KernelResponse } from './protocol.ts';
+import { requestTransferables } from './protocol.ts';
 import type { Transport } from './transport.ts';
 
 /**
@@ -65,7 +66,10 @@ export class WorkerTransport implements Transport {
 
     return new Promise<KernelResponse>((resolve) => {
       this.#pending.set(envelope.id, resolve);
-      worker.postMessage(envelope);
+      // A request carrying a payload transfers it rather than cloning it, so
+      // the caller's buffer is detached from here on. Mesh has always moved
+      // this way coming back; this is the same discipline going in.
+      worker.postMessage(envelope, requestTransferables(envelope.request));
     });
   }
 

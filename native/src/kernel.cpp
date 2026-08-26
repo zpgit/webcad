@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <sstream>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -17,7 +19,10 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BinTools.hxx>
+#include <BinTools_FormatVersion.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
@@ -28,7 +33,9 @@
 #include <TopLoc_Location.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
@@ -48,6 +55,12 @@ namespace {
 // rather than continuously - enough to report a session peak without
 // instrumenting the allocator.
 double g_peakMemoryBytes = 0.0;
+
+// The single staging buffer for byte payloads crossing the boundary, in either
+// direction. One at a time is deliberate: a document is checkpointed as a
+// whole, so there is never a second payload in flight, and a single buffer
+// makes "who owns these bytes" answerable at a glance.
+std::string g_staging;
 
 double currentMemoryBytes() {
   return static_cast<double>(emscripten_get_heap_size());
@@ -490,6 +503,163 @@ FaceTypeSummary faceTypeSummary(uint32_t bodyId) {
         default:                       ++out.other; break;
       }
     }
+    return out;
+  });
+}
+
+std::string geometryFormat() {
+  return "occt-bin-brep-v" +
+         std::to_string(static_cast<int>(BinTools_FormatVersion_CURRENT));
+}
+
+void discardStaging() {
+  // swap-with-empty rather than clear(): clear() keeps the capacity, and the
+  // point of discarding is to stop holding a checkpoint-sized allocation.
+  std::string().swap(g_staging);
+}
+
+StagingResult reserveStaging(uint32_t byteLength) {
+  if (byteLength == 0) {
+    return fail<StagingResult>(Status::InvalidParameter,
+                               "payload length must be positive");
+  }
+
+  return guarded<StagingResult>([&] {
+    discardStaging();
+    g_staging.resize(byteLength);
+
+    StagingResult out;
+    out.dataPtr = reinterpret_cast<uint32_t>(g_staging.data());
+    out.byteLength = byteLength;
+    return out;
+  });
+}
+
+SerializeResult serializeBodies(const std::vector<uint32_t>& bodyIds) {
+  // Resolved up front, before a single byte is written: a set containing an
+  // unknown handle must fail having produced nothing, not a partial payload
+  // that a caller might store.
+  std::vector<TopoDS_Shape> shapes;
+  shapes.reserve(bodyIds.size());
+  for (const uint32_t id : bodyIds) {
+    const TopoDS_Shape* found = registry().find(id);
+    if (found == nullptr) {
+      return fail<SerializeResult>(
+          Status::InvalidHandle,
+          "unknown or already-released body " + std::to_string(id));
+    }
+    shapes.push_back(*found);
+  }
+
+  return guarded<SerializeResult>([&] {
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const TopoDS_Shape& shape : shapes) {
+      builder.Add(compound, shape);
+    }
+
+    // withTriangles and withNormals are false: a checkpoint stores exact
+    // geometry, and any mesh in it would be derived data at one tolerance.
+    // An empty compound is written normally, so serializing no bodies yields a
+    // valid payload that restores to no bodies rather than an unreadable one.
+    std::ostringstream stream(std::ios::out | std::ios::binary);
+    BinTools::Write(compound, stream, false, false,
+                    BinTools_FormatVersion_CURRENT);
+
+    // One copy out of the stream's own buffer, move-assigned so it is not two.
+    // Measured rather than assumed away: the payload's byte length rides back
+    // on the result, so its cost is attributable against the recorded duration.
+    g_staging = stream.str();
+
+    SerializeResult out;
+    out.dataPtr = reinterpret_cast<uint32_t>(g_staging.data());
+    out.byteLength = static_cast<uint32_t>(g_staging.size());
+    out.bodyCount = static_cast<uint32_t>(shapes.size());
+    out.format = geometryFormat();
+    out.occtVersion = OCC_VERSION_COMPLETE;
+    return out;
+  });
+}
+
+RestoreResult restoreBodies() {
+  if (g_staging.empty()) {
+    return fail<RestoreResult>(Status::InvalidParameter,
+                               "no payload has been staged");
+  }
+
+  return guarded<RestoreResult>([&] {
+    // A second copy of the payload, for the same reason as the one in
+    // serializeBodies: a standard string stream owns its buffer. Both are
+    // visible in the recorded byte count, so neither is hidden.
+    std::istringstream stream(g_staging, std::ios::in | std::ios::binary);
+
+    TopoDS_Shape root;
+    BinTools::Read(root, stream);
+
+    if (root.IsNull()) {
+      return fail<RestoreResult>(Status::KernelOperationFailed,
+                                 "payload contained no shape");
+    }
+    // Every payload this kernel writes has a compound at its root. Anything
+    // else parsed successfully but was not written here, and restoring it
+    // would mean guessing at a body layout.
+    if (root.ShapeType() != TopAbs_COMPOUND) {
+      return fail<RestoreResult>(Status::KernelOperationFailed,
+                                 "payload is not a webcad checkpoint");
+    }
+
+    // Collected and checked before anything is registered, so the all-or-
+    // nothing guarantee does not depend on unwinding a partial registration.
+    std::vector<TopoDS_Shape> bodies;
+    for (TopoDS_Iterator it(root); it.More(); it.Next()) {
+      const TopoDS_Shape& child = it.Value();
+      if (child.IsNull() || countSubShapes(child, TopAbs_SOLID) == 0) {
+        return fail<RestoreResult>(
+            Status::KernelOperationFailed,
+            "payload contains a body with no solid at position " +
+                std::to_string(bodies.size()));
+      }
+      bodies.push_back(child);
+    }
+
+    // Note what is NOT done here: BRepCheck_Analyzer is not run on each body.
+    // Creation already validated this geometry, and a full validity analysis
+    // over every body is proportional to model size at exactly the moment the
+    // user is waiting for their document to open. Stream integrity is BinTools'
+    // job and payload integrity is the document manifest's; re-deciding
+    // validity is neither. A caller that wants it can ask bodyInfo.
+    RestoreResult out;
+    out.bodyCount = static_cast<uint32_t>(bodies.size());
+    if (bodies.empty()) {
+      return out;
+    }
+
+    std::vector<uint32_t> issued;
+    issued.reserve(bodies.size());
+    try {
+      for (const TopoDS_Shape& body : bodies) {
+        issued.push_back(registry().add(body));
+      }
+    } catch (...) {
+      for (const uint32_t id : issued) registry().release(id);
+      throw;
+    }
+
+    // The registry issues handles consecutively and never reuses one, which is
+    // what lets a caller address the i-th body as firstBodyId + i instead of
+    // receiving a list. Verified rather than assumed, so a future change to
+    // handle allocation fails loudly here instead of silently misaddressing
+    // every body in a restored document.
+    for (size_t i = 0; i < issued.size(); ++i) {
+      if (issued[i] != issued[0] + static_cast<uint32_t>(i)) {
+        for (const uint32_t id : issued) registry().release(id);
+        return fail<RestoreResult>(Status::KernelOperationFailed,
+                                   "registry issued non-consecutive handles");
+      }
+    }
+
+    out.firstBodyId = issued[0];
     return out;
   });
 }

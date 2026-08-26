@@ -58,6 +58,42 @@ export interface RawMeshResult {
   fromCache: boolean;
 }
 
+export interface RawStagingResult {
+  status: number;
+  message: string;
+  dataPtr: number;
+  byteLength: number;
+}
+
+export interface RawSerializeResult {
+  status: number;
+  message: string;
+  dataPtr: number;
+  byteLength: number;
+  bodyCount: number;
+  format: string;
+  occtVersion: string;
+}
+
+export interface RawRestoreResult {
+  status: number;
+  message: string;
+  firstBodyId: number;
+  bodyCount: number;
+}
+
+/**
+ * An embind `std::vector<uint32_t>`.
+ *
+ * Owned by the caller on the JavaScript side: embind allocates it in WASM
+ * memory and nothing frees it implicitly, so `delete()` is not optional.
+ */
+export interface RawBodyIdList {
+  push_back(value: number): void;
+  size(): number;
+  delete(): void;
+}
+
 export interface RawKernelStats {
   liveBodyCount: number;
   totalBodiesCreated: number;
@@ -106,6 +142,16 @@ export interface KernelModule {
   faceTypeSummary(bodyId: number): RawFaceTypeSummary;
   stats(): RawKernelStats;
   occtVersion(): string;
+
+  // Serialization. The payload is staged in WASM memory and addressed by byte
+  // offset, exactly as mesh data is, and the same rule applies: read it in one
+  // synchronous block and never retain the view.
+  readonly BodyIdList: new () => RawBodyIdList;
+  serializeBodies(bodyIds: RawBodyIdList): RawSerializeResult;
+  reserveStaging(byteLength: number): RawStagingResult;
+  restoreBodies(): RawRestoreResult;
+  discardStaging(): void;
+  geometryFormat(): string;
 
   // IMPORTANT: Emscripten replaces these views whenever linear memory grows.
   // They must be read fresh at every use and never cached - a retained view
