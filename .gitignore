@@ -2,6 +2,14 @@ node_modules/
 dist/
 .vite/
 
+# Registry configuration is environment-specific. The public npm registry is
+# unreachable from the Autodesk corporate network and an internal Artifactory
+# mirror stands in for it, so this is kept local rather than committed. The
+# lockfile records canonical registry.npmjs.org URLs; npm's default
+# replace-registry-host=npmjs rewrites the host to whatever registry is
+# configured, so a mirror works without touching the lockfile.
+.npmrc
+
 # Build inputs and outputs for the native kernel. The OCCT checkout and the
 # Emscripten SDK are large third-party trees; the compiled artifact is a
 # reproducible build product keyed on pinned tool versions.
