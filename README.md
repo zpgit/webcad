@@ -9,8 +9,13 @@ That constraint is the whole point. A drilled hole here is an analytic cylinder,
 not a fine faceting of one, which is what makes the result exportable to STEP
 later rather than merely good-looking.
 
-**[▶ Watch the 20-second demo](docs/demo.mp4)** — a capture of the running app:
-two primitives, a subtract, and the drilled result, with live timings.
+![Two solids created, selected as Boolean target and tool, subtracted into a
+drilled block, with a live readout of operation timings and WASM
+memory](docs/demo.gif)
+
+A capture of the running app, not a mockup. Watch the operation log flag the
+subtract as **over frame budget** — that is the finding MVP-1 acts on, visible
+rather than asserted. [Higher-quality MP4](docs/demo.mp4).
 
 ## Status: MVP-0
 
@@ -84,8 +89,8 @@ npm run kernel:size           # payload measurements
 npm run verify                # typecheck + tests + browser
 ```
 
-`npm run demo:record` drives the same path and re-records
-[`docs/demo.mp4`](docs/demo.mp4) in place, so the demo stays honest about what
+`npm run demo:record` drives the same path and re-records both `docs/demo.mp4`
+and the embedded `docs/demo.gif` in place, so the demo stays honest about what
 the app currently does.
 
 Browser verification drives your installed system Chrome through

@@ -11,7 +11,14 @@
 
 import { chromium } from 'playwright-core';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, renameSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import process from 'node:process';
 
@@ -38,6 +45,17 @@ const OUT_DIR = 'docs';
 const RAW_DIR = join('measurements', '.demo-raw');
 const WIDTH = 1280;
 const HEIGHT = 800;
+
+// GIF settings, for the copy the README embeds inline.
+//
+// 800px is about GitHub's README content width, so it displays roughly 1:1 and
+// the measurement panel stays readable - below that the operation log turns to
+// mush and the GIF stops being worth its bytes. 128 colours with an ordered
+// dither keeps the shaded surfaces from banding; dropping to 64 saves little
+// and bands visibly on the gradients.
+const GIF_WIDTH = 800;
+const GIF_FPS = 10;
+const GIF_COLORS = 128;
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -310,6 +328,44 @@ try {
     if (!keepWebm) {
       rmSync(webm, { force: true });
       console.log(`  removed ${webm} (pass --keep-webm to keep it)`);
+    }
+
+    // A GIF as well, because GitHub plays an embedded GIF inline in the README
+    // but renders a repo-relative MP4 as a download link.
+    //
+    // Two passes: build a palette from the whole clip, then map to it. A single
+    // pass would take GIF's default 216-colour web palette and posterise every
+    // shaded surface.
+    const gif = mp4.replace(/\.mp4$/, '.gif');
+    const palette = join('measurements', '.demo-palette.png');
+    mkdirSync('measurements', { recursive: true });
+
+    const scale = `fps=${GIF_FPS},scale=${GIF_WIDTH}:-1:flags=lanczos`;
+    const pass1 = spawnSync(
+      'ffmpeg',
+      ['-y', '-v', 'error', '-i', mp4,
+       // stats_mode=diff weights the palette toward what actually changes
+       // between frames, rather than spending it on the static panel.
+       '-vf', `${scale},palettegen=stats_mode=diff:max_colors=${GIF_COLORS}`,
+       palette],
+      { stdio: 'ignore' },
+    );
+    const pass2 = pass1.status === 0
+      ? spawnSync(
+          'ffmpeg',
+          ['-y', '-v', 'error', '-i', mp4, '-i', palette,
+           '-lavfi', `${scale}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`,
+           gif],
+          { stdio: 'ignore' },
+        )
+      : { status: 1 };
+    rmSync(palette, { force: true });
+
+    if (pass2.status === 0) {
+      const mb = statSync(gif).size / 1024 / 1024;
+      console.log(`Wrote ${gif} (${mb.toFixed(2)} MB)`);
+    } else {
+      console.log('  (GIF conversion failed; MP4 is still written)');
     }
   }
 } catch (error) {

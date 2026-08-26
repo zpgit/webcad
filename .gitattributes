@@ -7,3 +7,4 @@
 *.wasm binary
 *.mp4 binary
 *.webm binary
+*.gif binary
