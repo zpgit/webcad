@@ -91,9 +91,10 @@ npm run typecheck
 npm test                      # 66 tests; kernel tests skip if unbuilt
 npm run verify:browser        # drives the real app in Chrome (WebGPU)
 npm run verify:browser:webgl  # same, forcing the WebGL2 fallback
+npm run verify:dist           # drives the production build, served statically
 npm run kernel:size           # payload measurements
 
-npm run verify                # typecheck + tests + browser
+npm run verify                # typecheck + tests + browser + dist
 ```
 
 `npm run demo:record` drives the same path and re-records both `docs/demo.mp4`
@@ -109,6 +110,13 @@ It also measures the Worker boundary and fails if the main thread stalls for
 more than three frames while the kernel works, so "the kernel is off the main
 thread" is a checked claim rather than a described one. Those numbers land in
 `measurements/worker.json`.
+
+`npm run verify:dist` exists because everything above runs against the dev
+server, which resolves assets from their source paths while a build rewrites
+them to hashed names under `assets/`. That difference once shipped a `dist/`
+that could not load the kernel at all. It builds, serves the output as a static
+host would, and asserts the kernel reaches ready and the `.wasm` was really
+fetched.
 
 ## Layout
 

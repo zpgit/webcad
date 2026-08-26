@@ -37,11 +37,11 @@ export function killTree(proc) {
 export const DEV_HOST = '127.0.0.1';
 export const devOrigin = (port) => `http://${DEV_HOST}:${port}`;
 
-export function startDevServer(port) {
+function startViteServer(subcommand, port, label) {
   const origin = devOrigin(port);
   const proc = spawn(
     process.platform === 'win32' ? 'npx.cmd' : 'npx',
-    ['vite', '--host', DEV_HOST, '--port', String(port), '--strictPort'],
+    ['vite', ...subcommand, '--host', DEV_HOST, '--port', String(port), '--strictPort'],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
@@ -51,7 +51,7 @@ export function startDevServer(port) {
   );
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error('dev server did not start within 60s')),
+      () => reject(new Error(`${label} did not start within 60s`)),
       60_000,
     );
     const onData = (chunk) => {
@@ -64,10 +64,23 @@ export function startDevServer(port) {
     proc.stderr.on('data', onData);
     proc.on('exit', (code) => {
       clearTimeout(timer);
-      reject(new Error(`dev server exited with code ${code}`));
+      reject(new Error(`${label} exited with code ${code}`));
     });
   });
 }
+
+export const startDevServer = (port) => startViteServer([], port, 'dev server');
+
+/**
+ * Serves an existing `dist/` the way a static host would.
+ *
+ * Separate from the dev server because the two resolve assets differently, and
+ * that difference is exactly what shipped a `dist/` unable to load the kernel:
+ * dev serves files from their source paths, while a build rewrites them to
+ * hashed names under assets/.
+ */
+export const startPreviewServer = (port) =>
+  startViteServer(['preview'], port, 'preview server');
 
 /**
  * Shift-click.

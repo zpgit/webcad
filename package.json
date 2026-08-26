@@ -16,9 +16,10 @@
     "kernel:build": "bash scripts/build-kernel.sh",
     "verify:browser": "node scripts/verify-browser.mjs",
     "verify:browser:webgl": "node scripts/verify-browser.mjs --force-webgl",
+    "verify:dist": "vite build && node scripts/verify-dist.mjs",
     "demo:record": "node scripts/record-demo.mjs",
     "kernel:size": "bash scripts/report-artifact-size.sh",
-    "verify": "npm run typecheck && npm test && npm run verify:browser"
+    "verify": "npm run typecheck && npm test && npm run verify:browser && npm run verify:dist"
   },
   "dependencies": {
     "three": "^0.185.1"

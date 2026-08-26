@@ -175,6 +175,30 @@ future measurement of main-thread behavior needs
 `scripts/verify-browser.mjs` now passes. A rAF-based probe would have reported a
 catastrophic failure that was not happening.
 
+## The production build could not start the kernel
+
+Found while verifying this change and not caused by it, but worth recording
+here because of *why* it went unnoticed.
+
+`vite build` emitted the Emscripten loader into `assets/` under a content-hashed
+name and never emitted `webcad_kernel.wasm` at all. The built app therefore
+asked for a file that was not there and showed its "kernel not built" message on
+a machine where the kernel was very much built.
+
+It survived because every check pointed at the dev server, where the loader
+finds the `.wasm` sitting next to itself in `src/kernel/wasm/` and its default
+resolution — `new URL("webcad_kernel.wasm", import.meta.url)` — is correct. A
+build breaks that adjacency: both files become hashed assets, so the loader asks
+for an unhashed name that was never written. The loader now gets the resolved URL
+handed to it through Emscripten's `locateFile` instead of inferring one, and both
+files are referenced via `new URL(..., import.meta.url)` so Vite emits them.
+
+The general lesson is the one worth carrying forward: dev-server verification
+says nothing about a build. `npm run verify:dist` now builds, serves `dist/` as
+a static host would, and asserts both that the kernel reaches ready and that the
+`.wasm` was fetched with a 200 — the latter because "no request failed" also
+passes when the file is never requested at all.
+
 ## What this does not answer
 
 - **Nothing about shared memory.** It stays closed, as
@@ -190,10 +214,11 @@ catastrophic failure that was not happening.
 - **Nothing about large models.** These meshes top out at 5024 triangles. The
   transfer curve is flat and the clone curve is linear, so the crossover is
   established, but absolute costs at STEP-file scale belong to MVP-2.
-- **Nothing about the production build.** Verified in `vite dev` and confirmed
-  that `vite build` emits the Worker as its own chunk resolving the Emscripten
-  module correctly. The built `dist/` does not ship `webcad_kernel.wasm` at all,
-  which predates this change and is tracked separately.
+- **Nothing about the production build's performance.** Every number above was
+  measured against the dev server. `npm run verify:dist` asserts the built app
+  starts and works, but nothing about its timing, and a minified bundle is not
+  self-evidently identical in behavior. Worth re-measuring if a later stage
+  depends on the figures holding in a build.
 
 ## Reproducing
 
@@ -202,6 +227,7 @@ npm run kernel:build          # once
 npm test                      # 66 tests
 npm run verify:browser        # WebGPU + boundary measurements
 npm run verify:browser:webgl  # WebGL2 fallback
+npm run verify:dist           # the built app, served statically
 ```
 
 Artifacts land in `measurements/`: `worker.json`, `worker-webgl2.json`,
