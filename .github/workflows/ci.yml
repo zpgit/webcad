@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A cold kernel build is slow enough that being able to trigger CI on demand
+  # -- after a cache eviction, or to re-run without an empty commit -- is worth
+  # the one line.
+  workflow_dispatch:
 
 jobs:
   build-and-test:
