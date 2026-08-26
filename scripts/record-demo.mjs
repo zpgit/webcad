@@ -31,8 +31,11 @@ const portIndex = args.indexOf('--port');
 const port = portIndex === -1 ? 5200 : Number(args[portIndex + 1]);
 const origin = devOrigin(port);
 
-const OUT_DIR = 'measurements';
-const RAW_DIR = join(OUT_DIR, '.demo-raw');
+// The demo is a published asset rather than a per-run measurement, so it lives
+// in docs/ and is committed. Re-running this updates it in place, which is what
+// keeps it from drifting away from what the app actually does.
+const OUT_DIR = 'docs';
+const RAW_DIR = join('measurements', '.demo-raw');
 const WIDTH = 1280;
 const HEIGHT = 800;
 

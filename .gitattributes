@@ -5,3 +5,5 @@
 *.png binary
 *.pdf binary
 *.wasm binary
+*.mp4 binary
+*.webm binary

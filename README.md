@@ -9,6 +9,9 @@ That constraint is the whole point. A drilled hole here is an analytic cylinder,
 not a fine faceting of one, which is what makes the result exportable to STEP
 later rather than merely good-looking.
 
+**[▶ Watch the 20-second demo](docs/demo.mp4)** — a capture of the running app:
+two primitives, a subtract, and the drilled result, with live timings.
+
 ## Status: MVP-0
 
 MVP-0 was not built to be a usable modeler. It existed to measure the
@@ -81,8 +84,9 @@ npm run kernel:size           # payload measurements
 npm run verify                # typecheck + tests + browser
 ```
 
-`npm run demo:record` drives the same path and records it to
-`measurements/demo.mp4` — a real capture of the running app, not a mockup.
+`npm run demo:record` drives the same path and re-records
+[`docs/demo.mp4`](docs/demo.mp4) in place, so the demo stays honest about what
+the app currently does.
 
 Browser verification drives your installed system Chrome through
 `playwright-core`, downloading no browser binaries. It covers what node tests
