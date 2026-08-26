@@ -126,9 +126,19 @@ picking. It writes screenshots and JSON to `measurements/`.
 These are specific to the machine this was first built on, recorded so the next
 person does not rediscover them.
 
-- **`registry.npmjs.org` is unreachable** on the Autodesk corporate network. A
-  project-local `.npmrc` points at the Artifactory mirror. Remove it if you are
-  building elsewhere.
+- **`registry.npmjs.org` is unreachable** on the Autodesk corporate network.
+  Point npm at the Artifactory mirror with a project-local `.npmrc`, which is
+  gitignored because registry configuration is environment-specific:
+
+  ```
+  registry=https://art-bobcat.autodesk.com/artifactory/api/npm/autodesk-npm-virtual/
+  ```
+
+  The lockfile records canonical `registry.npmjs.org` URLs and must stay that
+  way. npm's default `replace-registry-host=npmjs` rewrites the host of those
+  URLs to whatever registry is configured, so a mirror works without the
+  lockfile knowing about it. A lockfile carrying mirror URLs installs only on
+  that network — which is what broke CI once already.
 - **Node 23 is not supported by vitest**, whose engine range excludes odd Node
   releases. The project uses Node's built-in test runner instead, which also
   removes a dependency. Tests run with `--experimental-strip-types`.
