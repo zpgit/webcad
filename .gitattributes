@@ -1,0 +1,7 @@
+# Normalize to LF in the repository. The kernel build entry points are bash
+# scripts invoked via npm on every platform, and CRLF breaks them.
+* text=auto eol=lf
+
+*.png binary
+*.pdf binary
+*.wasm binary

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Read pinned toolchain versions
+        id: pins
+        run: |
+          set -a; . native/toolchain.env; set +a
+          echo "emsdk=$WEBCAD_EMSDK_VERSION" >> "$GITHUB_OUTPUT"
+          echo "occt=$WEBCAD_OCCT_VERSION" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+
+      # An OCCT build from scratch is slow enough that an uncached step would
+      # discourage running it, so the install tree is cached on the pinned
+      # versions. The facade relinks in seconds on a cache hit.
+      - name: Cache OCCT install tree
+        id: occt-cache
+        uses: actions/cache@v4
+        with:
+          path: native/build/occt-${{ steps.pins.outputs.occt }}-install
+          key: occt-${{ steps.pins.outputs.occt }}-emsdk-${{ steps.pins.outputs.emsdk }}-${{ runner.os }}
+
+      - name: Cache Emscripten SDK
+        uses: actions/cache@v4
+        with:
+          path: third_party/emsdk
+          key: emsdk-${{ steps.pins.outputs.emsdk }}-${{ runner.os }}
+
+      - name: Install Emscripten
+        run: bash scripts/install-emsdk.sh
+
+      - name: Fetch OCCT source
+        if: steps.occt-cache.outputs.cache-hit != 'true'
+        run: bash scripts/fetch-occt.sh
+
+      - name: Build OCCT
+        if: steps.occt-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-kernel.sh --occt-only
+
+      - name: Build kernel facade
+        run: bash scripts/build-kernel.sh --facade-only
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Kernel tests skip themselves when the artifact is missing, so this step
+      # failing means a real regression rather than a missing build.
+      - name: Test
+        run: npm test
+
+      - name: Build app
+        run: npm run build
+
+      # Exercises the render path, backend selection, GPU upload, and picking -
+      # none of which the node tests can reach. Ubuntu runners ship Chrome, and
+      # playwright-core drives it rather than downloading a browser.
+      - name: Verify in browser (WebGPU where available)
+        run: npm run verify:browser
+
+      - name: Verify in browser (WebGL2 fallback)
+        run: npm run verify:browser:webgl
+
+      - name: Upload payload measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: measurements
+          path: measurements/

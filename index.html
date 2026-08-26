@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Web CAD — MVP-0</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="viewport"></canvas>
+
+      <aside id="panel">
+        <h1>Web CAD <span class="stage">MVP-0</span></h1>
+
+        <section>
+          <h2>Create</h2>
+          <div class="row">
+            <button id="btn-box" type="button">Box</button>
+            <button id="btn-cylinder" type="button">Cylinder</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Boolean</h2>
+          <p class="hint" id="selection-hint">Select two bodies.</p>
+          <div class="row">
+            <button id="btn-union" type="button" disabled>Union</button>
+            <button id="btn-subtract" type="button" disabled>Subtract</button>
+            <button id="btn-intersect" type="button" disabled>Intersect</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>View</h2>
+          <div class="row">
+            <button id="btn-fit" type="button">Fit</button>
+            <button id="btn-demo" type="button">Demo scene</button>
+            <button id="btn-release" type="button">Release selected</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Measurements</h2>
+          <dl id="measurements"></dl>
+        </section>
+
+        <section>
+          <h2>Operation log</h2>
+          <ol id="oplog"></ol>
+        </section>
+      </aside>
+    </div>
+
+    <div id="fatal" hidden></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

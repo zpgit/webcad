@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.vite/
+
+# Build inputs and outputs for the native kernel. The OCCT checkout and the
+# Emscripten SDK are large third-party trees; the compiled artifact is a
+# reproducible build product keyed on pinned tool versions.
+third_party/occt/
+third_party/emsdk/
+native/build/
+src/kernel/wasm/*.js
+src/kernel/wasm/*.mjs
+src/kernel/wasm/*.wasm
+src/kernel/wasm/*.map
+
+# Measurement output is a per-run artifact, reproducible via `npm run verify`.
+# The findings that matter are written up in docs/MVP-0-FINDINGS.md.
+measurements/
+
+# ninja is provisioned from node_modules by scripts/_common.sh.
+tools/bin/

@@ -1,0 +1,60 @@
+schema: spec-driven
+
+context: |
+  Project: Web CAD - a browser-native solid modeler with exact B-Rep geometry
+  and STEP interoperability. Greenfield; no code exists yet.
+
+  Source of record: web_cad_brep_step_architecture_en.pdf (architecture
+  exploration note) at the repo root. Its section 11 lists the standing
+  architectural decisions; treat them as binding constraints:
+
+  - Geometry kernel: OCCT compiled to WebAssembly, or an equivalent exact
+    B-Rep kernel.
+  - Canonical geometry: kernel-native B-Rep. Tessellated mesh is for
+    rendering only and is NEVER the geometric source of truth.
+  - Web boundary: exact B-Rep stays resident in WASM linear memory. The
+    JS/TS layer holds opaque handles (BodyId/FaceId/OperationId), document
+    semantics, and render buffers - never materialized topology. APIs look
+    like kernel.booleanCut({target, tool}), not B-Rep copies across the
+    boundary.
+  - Native document: a versioned container (feature/assembly/metadata plus a
+    B-Rep checkpoint). It is explicitly NOT STEP.
+  - B-Rep persistence: OCCT native .brep serialization for the prototype;
+    evolve to a versioned binary payload later.
+  - Interchange: STEP is the first-priority CAD format. GLB/glTF serves
+    visualization; STL serves simple mesh interchange. Translation is a
+    boundary concern and must not leak through the application.
+  - Imported STEP: enters as an ImportedBody/base feature. Do not invent
+    parametric history for it.
+  - Assembly: if in scope, prefer XCAF/XDE over a pure TopoDS_Shape model.
+
+  Staged roadmap from the note (each stage validates one bottleneck):
+    MVP-0 Box/Cylinder + Boolean + viewport ...... OCCT/WASM-to-render boundary
+    MVP-1 Native document + .brep checkpoint ..... restart recovery cost
+    MVP-2 STEP import + edit + STEP export ....... round-trip fidelity
+    MVP-3 Assembly/name/color via XCAF ........... STEP document semantics
+    MVP-4 Persistent refs + incremental recompute  edit stability
+
+  Known hard problem (note section 7): stable downstream references to faces
+  and edges across topology changes. Positional references like Face_17 are
+  unacceptable; prefer semantic/persistent references. Early stages may
+  reduce this risk by limiting recompute scope and favoring direct edits.
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours

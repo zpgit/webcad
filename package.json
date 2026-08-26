@@ -1,0 +1,33 @@
+{
+  "name": "webcad",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-native B-Rep modeling with an OCCT/WASM geometry kernel (MVP-0)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/**/*.test.ts",
+    "test:watch": "node --experimental-strip-types --test --watch tests/**/*.test.ts",
+    "kernel:fetch": "bash scripts/fetch-occt.sh",
+    "kernel:hello": "bash scripts/build-hello.sh",
+    "kernel:build": "bash scripts/build-kernel.sh",
+    "verify:browser": "node scripts/verify-browser.mjs",
+    "verify:browser:webgl": "node scripts/verify-browser.mjs --force-webgl",
+    "kernel:size": "bash scripts/report-artifact-size.sh",
+    "verify": "npm run typecheck && npm test && npm run verify:browser"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/three": "^0.185.0",
+    "ninja-binaries": "^1.12.1",
+    "playwright-core": "^1.62.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
