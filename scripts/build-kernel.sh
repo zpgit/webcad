@@ -26,8 +26,6 @@ for arg in "$@"; do
   esac
 done
 
-[ -d "$OCCT_DIR" ] || die "OCCT source missing - run scripts/fetch-occt.sh"
-
 OCCT_BUILD="$BUILD_DIR/occt-${WEBCAD_OCCT_VERSION}"
 OCCT_INSTALL="$BUILD_DIR/occt-${WEBCAD_OCCT_VERSION}-install"
 FACADE_BUILD="$BUILD_DIR/facade"
@@ -46,6 +44,12 @@ build_occt() {
     log "OCCT ${WEBCAD_OCCT_VERSION} already built at $OCCT_INSTALL"
     return 0
   fi
+
+  # Only compiling OCCT needs its source. The facade links against the install
+  # tree and never reads it, so this check belongs here rather than at the top
+  # of the script: CI restores the install tree from cache without re-cloning
+  # the source, and a top-level guard failed that build for no reason.
+  [ -d "$OCCT_DIR" ] || die "OCCT source missing - run scripts/fetch-occt.sh"
 
   log "configuring OCCT ${WEBCAD_OCCT_VERSION} for wasm (this takes a while)"
   emcmake cmake \
