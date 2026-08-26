@@ -16,6 +16,7 @@
     "kernel:build": "bash scripts/build-kernel.sh",
     "verify:browser": "node scripts/verify-browser.mjs",
     "verify:browser:webgl": "node scripts/verify-browser.mjs --force-webgl",
+    "demo:record": "node scripts/record-demo.mjs",
     "kernel:size": "bash scripts/report-artifact-size.sh",
     "verify": "npm run typecheck && npm test && npm run verify:browser"
   },

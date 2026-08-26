@@ -81,6 +81,9 @@ npm run kernel:size           # payload measurements
 npm run verify                # typecheck + tests + browser
 ```
 
+`npm run demo:record` drives the same path and records it to
+`measurements/demo.mp4` — a real capture of the running app, not a mockup.
+
 Browser verification drives your installed system Chrome through
 `playwright-core`, downloading no browser binaries. It covers what node tests
 cannot reach — the render path, backend selection, GPU upload, and picking — and

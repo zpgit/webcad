@@ -9,31 +9,15 @@
 // Usage: node scripts/verify-browser.mjs [--headed] [--port 5199]
 
 import { chromium } from 'playwright-core';
-import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import process from 'node:process';
 
-/**
- * Terminates the dev server and everything it spawned.
- *
- * `proc.kill()` alone kills the npx shim and orphans the actual vite process,
- * which keeps holding the port. Repeated runs then pile up abandoned servers and
- * the next `--strictPort` start fails.
- */
-function killTree(proc) {
-  if (proc === undefined || proc.pid === undefined) return;
-  if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/pid', String(proc.pid), '/T', '/F'], {
-      stdio: 'ignore',
-    });
-  } else {
-    try {
-      process.kill(-proc.pid, 'SIGTERM');
-    } catch {
-      proc.kill('SIGTERM');
-    }
-  }
-}
+import {
+  devOrigin,
+  killTree,
+  shiftClick,
+  startDevServer,
+} from './_browser.mjs';
 
 const args = process.argv.slice(2);
 const headed = args.includes('--headed');
@@ -43,60 +27,13 @@ const forceWebgl = args.includes('--force-webgl');
 const expectedBackend = forceWebgl ? 'webgl2' : null;
 const portIndex = args.indexOf('--port');
 const port = portIndex === -1 ? 5199 : Number(args[portIndex + 1]);
-const origin = `http://localhost:${port}`;
+const origin = devOrigin(port);
 
 const findings = [];
 const note = (message) => {
   findings.push(message);
   console.log(`  ${message}`);
 };
-
-function startDevServer() {
-  const proc = spawn(
-    process.platform === 'win32' ? 'npx.cmd' : 'npx',
-    ['vite', '--port', String(port), '--strictPort'],
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
-      // Own process group on POSIX so killTree can signal the whole tree.
-      detached: process.platform !== 'win32',
-    },
-  );
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('dev server did not start within 60s')),
-      60_000,
-    );
-    const onData = (chunk) => {
-      if (String(chunk).includes('ready in') || String(chunk).includes(origin)) {
-        clearTimeout(timer);
-        resolve(proc);
-      }
-    };
-    proc.stdout.on('data', onData);
-    proc.stderr.on('data', onData);
-    proc.on('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`dev server exited with code ${code}`));
-    });
-  });
-}
-
-/**
- * Shift-click.
- *
- * `page.mouse.click()` accepts no `modifiers` option - that belongs to
- * locator.click() - so passing one is silently ignored and the click arrives
- * with shiftKey false. The modifier has to be held around the click.
- */
-async function shiftClick(page, x, y) {
-  await page.keyboard.down('Shift');
-  try {
-    await page.mouse.click(x, y);
-  } finally {
-    await page.keyboard.up('Shift');
-  }
-}
 
 async function readReadout(page) {
   return page.evaluate(() => {
@@ -117,7 +54,7 @@ let exitCode = 0;
 
 try {
   console.log('Starting dev server...');
-  server = await startDevServer();
+  server = await startDevServer(port);
 
   browser = await chromium.launch({
     channel: 'chrome',
