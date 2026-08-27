@@ -69,7 +69,20 @@ function startViteServer(subcommand, port, label) {
   });
 }
 
-export const startDevServer = (port) => startViteServer([], port, 'dev server');
+/**
+ * A dev server for a verification run.
+ *
+ * `--force` re-bundles dependencies at startup instead of trusting the cache.
+ * It costs a few seconds per run and buys determinism: without it, the optimizer
+ * can decide mid-page-load that it needs to re-bundle, and a module request that
+ * is being held while that happens never resolves - which arrives as
+ * `page.goto: Timeout exceeded` against a server that answers every URL in
+ * milliseconds when probed by hand. Three runs failed that way, and clearing
+ * `node_modules/.vite` was the only thing that reliably fixed it. Doing the
+ * re-bundle up front removes the window entirely.
+ */
+export const startDevServer = (port) =>
+  startViteServer(['--force'], port, 'dev server');
 
 /**
  * Serves an existing `dist/` the way a static host would.

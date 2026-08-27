@@ -98,15 +98,104 @@
 
 ## 6. Measurement and verification
 
-- [ ] 6.1 Extend `scripts/verify-browser.mjs` with serialize and restore timings against at least a small and a large checkpoint, reporting payload size alongside duration.
-- [ ] 6.2 Measure save and open latency for both backends on the same workload and payload sizes, into one artifact that permits direct comparison (`measurements/document.json`).
-- [ ] 6.3 Measure recovery in phases — kernel ready, document read, restore, tessellate, first frame — plus the total, via a genuine reload against a stored document, and assert that the run fails if a main-thread stall during save, open, or restore exceeds the existing three-frame bound.
-- [ ] 6.4 Choose the default backend on the measurements and record what the losing one cost and under what conditions the choice would change.
-- [ ] 6.5 Verify persistence survives a real restart in `npm run verify:dist` as well as the dev server, since dev-server verification says nothing about a build.
-- [ ] 6.6 Write `docs/MVP-1-FINDINGS.md` covering serialize/deserialize throughput against size, the storage comparison and the decision, phased recovery cost, payload-size impact, main-thread behavior during persistence, and an explicit "what this does not answer" — no large models, no STEP-scale checkpoints, no recompute, no browser other than the one verified.
+- [x] 6.1 Extend `scripts/verify-browser.mjs` with serialize and restore timings against at least a small and a large checkpoint, reporting payload size alongside duration.
+- [x] 6.2 Measure save and open latency for both backends on the same workload and payload sizes, into one artifact that permits direct comparison (`measurements/document.json`).
+- [x] 6.3 Measure recovery in phases — kernel ready, document read, restore, tessellate, first frame — plus the total, via a genuine reload against a stored document, and assert that the run fails if a main-thread stall during save, open, or restore exceeds the existing three-frame bound.
+- [x] 6.4 Choose the default backend on the measurements and record what the losing one cost and under what conditions the choice would change.
+- [x] 6.5 Verify persistence survives a real restart in `npm run verify:dist` as well as the dev server, since dev-server verification says nothing about a build.
+- [x] 6.6 Write `docs/MVP-1-FINDINGS.md` covering serialize/deserialize throughput against size, the storage comparison and the decision, phased recovery cost, payload-size impact, main-thread behavior during persistence, and an explicit "what this does not answer" — no large models, no STEP-scale checkpoints, no recompute, no browser other than the one verified.
+
+### Notes from group 6, for the findings document
+
+The numbers themselves are in `docs/MVP-1-FINDINGS.md`. These are notes about the
+measuring, which the findings document is not the place for.
+
+- **The measurement lives in `tests/browser/document-measurements.ts`, not in the harness.** Same reasoning as the storage conformance suite: it needs the real kernel, the real document layer, and both real stores, and it gets typechecked with them. The harness supplies a browser, applies thresholds, and writes the artifact. `page.evaluate` with a 300-line function body would have been untypechecked and unreadable.
+- **Recovery phases are `performance.measure` entries in production code, not a dev-only timing hook.** Three reasons, and the third decided it: the entries survive a reload and are readable by anything holding `performance`; they show up in a DevTools profile next to the frames they explain; and `verify:dist` has no `window.__webcad` to read a bespoke object out of, so a dev-only mechanism could not have measured a build at all. The build column of the recovery table exists because of this choice.
+- **A single save is too fast to sample for main-thread stall.** At 7 ms wall against the probe's 4 ms period, the first run reported *zero samples* — and the harness correctly refused to call that a pass. Fixed by probing a burst of 12 saves in one window: the worst gap is still the worst single stall, since a save that blocked would block once per iteration. The sample count is now reported alongside the stall so an inconclusive run stays visible.
+- **The storage measurement cross-checks the serialization ladder, and they agree.** IndexedDB's `open` minus its `read` for the 459 kB document is 6.6 ms; the ladder's independent restore median for the same payload is 6.3 ms. Two different code paths, two different timers, same number. That is worth more than either figure alone.
+- **The payload ladder is asserted to span sizes.** `verify:browser` fails if the largest checkpoint is under 10× the smallest, because "throughput as a function of size" from five points that are all the same size would be extrapolation dressed as measurement.
+- **An unavailable backend fails the run rather than being skipped**, unlike the quota check. A skipped quota check leaves a gap in coverage; a missing backend would leave the *default backend decision* unsupported, and that is a conclusion rather than a check.
+- **The WebGL2 run is uniformly 1.5–2× slower than the WebGPU one, including kernel-side serialization.** No renderer can affect how fast OCCT writes a shape, so this is machine load, not a backend difference. Stated in the findings so nobody reads the two artifacts as a backend comparison. It also means these numbers are not precise enough to compare across runs — directions and ratios are, absolute milliseconds are not.
+- **`verify:dist` drives persistence entirely through the DOM**, because the verification handle is deliberately stripped from a build and asserting its absence is one of that script's existing checks. Set the name, click Save, reload, wait for the status line, compare the readout. Narrower than the dev-server run on purpose: it asks the question a *build* can break, and leaves identity and geometry to the run that can reach inside the session.
+- **The dist run deletes the document it created.** Chrome launches with a fresh profile per run so nothing leaks between runs, but a document left behind would be reopened at startup by the next run *before* it builds the demo scene, and the assertions after that would be measuring a different scene than they claim.
+- **Cost paid twice: `page.goto` timed out at the 30 s default** on a busy machine while the dev server transformed the module graph and pre-bundled three.js, which reads as a broken app rather than a slow one. `verify-storage.mjs` had already been given 60 s for this; `verify-browser.mjs` now matches it.
 
 ## 7. Wrap-up
 
-- [ ] 7.1 Run the full gate: `npm run typecheck`, `npm test`, `npm run verify:browser`, `npm run verify:browser:webgl`, `npm run verify:dist`.
-- [ ] 7.2 Update `README.md` and `docs/BUILD.md` for the new capability and any new scripts, and correct the stale claim in `src/app/modeling-session.ts` that reloading discards all modeling state.
-- [ ] 7.3 Re-read the change's specs against what was built, and record any requirement that was not met, so the gap is stated rather than discovered at archive time.
+- [x] 7.1 Run the full gate: `npm run typecheck`, `npm test`, `npm run verify:browser`, `npm run verify:browser:webgl`, `npm run verify:dist`.
+- [x] 7.2 Update `README.md` and `docs/BUILD.md` for the new capability and any new scripts, and correct the stale claim in `src/app/modeling-session.ts` that reloading discards all modeling state.
+- [x] 7.3 Re-read the change's specs against what was built, and record any requirement that was not met, so the gap is stated rather than discovered at archive time.
+
+### Notes from group 7
+
+**The gate.** `typecheck` clean; **114 Node tests pass**; `verify:browser` passes
+on WebGPU and, forced, on WebGL2; `verify:storage` passes with **24 conformance
+checks across both backends** plus two quota results, one of them a reported skip
+(IndexedDB quota, which Chrome will not enforce); `verify:dist` passes including a
+save, a browser reload, and a reopen in the built app. `measurements/document.json`
+and `document-webgl2.json` were regenerated by the final code and the findings
+document is reconciled against them figure by figure — they are build products like
+everything else under `measurements/`, so they are gitignored rather than
+committed, which is why the findings document has to carry the numbers itself.
+
+- **The stale claim in `modeling-session.ts` was already gone.** Group 5 rewrote
+  that file, and its header now says handles are session-scoped and mean nothing
+  after a reload — which is true and is the opposite of the claim 7.2 was written
+  to correct. Recorded so the checkbox does not read as work skipped.
+- **`docs/BUILD.md` had drifted independently of this change**: it advertised 49
+  tests against 114, and predated `verify:storage` and `verify:dist` entirely.
+  Fixed while nearby.
+- **`README.md` says the three new capabilities live under the change**, not under
+  `openspec/specs/`, because they do until it is archived. Claiming otherwise would
+  have been a link a reader could follow to nothing.
+
+**Spec re-read (7.3).** Every requirement in the five delta specs is met. Two
+things came out of the re-read that were worth acting on rather than recording:
+
+- **"Opening replaces the previous session cleanly" had no coverage anywhere.**
+  Every persistence check either starts from a fresh page — where there is no
+  outgoing session to release — or drives `readDocument` without a session. So the
+  requirement's own words, "reopening does not leak kernel memory", were untested.
+  `verify:browser` now reopens the already-open document over a live session and
+  asserts the kernel's live-handle count equals the reopened document's body count
+  and the viewport's triangle count is unchanged. It passes; it would have caught a
+  missing `#clear()`.
+- **The Worker spec's responsiveness requirement was measured, but not
+  attributable.** It is specifically about "the longest main-thread task
+  attributable to the request" for a request carrying a large payload, and the
+  persistence probe bundled restore with storage I/O and tessellation — which is
+  what a user waits through but not what that requirement asks. A restore-only
+  probe was added: eight restores of a 458 kB checkpoint with nothing else in the
+  window, worst stall 6.5 ms against a 6.0 ms idle baseline. The bundled figure
+  crossed one frame on OPFS in three runs, so this distinction was not academic —
+  without it, a storage cost would have been reported against the kernel.
+
+Interpretations recorded rather than gaps, so the archive does not have to
+re-derive them:
+
+- **"The last document is gone" is satisfied by one of its two paths.** Deleting
+  the last-opened document clears the pointer, so the next load starts empty with
+  nothing to report — there is no recorded document to explain the absence of. The
+  scenario's "reports the reason" is exercised by the other path, a document that
+  is present but unreadable, which `main.ts` reports on screen.
+- **"Quota exhausted" is proven in a browser for OPFS only.** Chrome does not
+  enforce `Storage.overrideQuotaForOrigin` for IndexedDB, so the default backend's
+  typed quota failure is covered by a Node test that maps the exception and by
+  nothing in a real browser. `verify:storage` says so after its verdict, and the
+  findings state the irony plainly: the default backend is the one whose quota
+  behavior cannot be provoked.
+- **`topology.bin` and `preview.glb` from the architecture note's layout are
+  absent**, deliberately and as recorded in group 3. Nothing in the delta specs
+  requires them.
+
+**Measurement precision is now a stated caveat, not a footnote.** The same 459 kB
+checkpoint serialized at anywhere from 70 to 112 kB/ms across six runs on this
+host, because the machine runs an ordinary desktop Chrome alongside the
+verification. The findings document says to read ratios and orderings as results
+and absolute milliseconds as ±50%, and every conclusion in it survives that. Two
+claims had to be rewritten to survive it: the save decomposition, whose
+main-thread residual came out at 1.6 ms in one artifact and approximately zero in
+the other (now bounded by the stall probe instead of by subtraction), and the
+worst-stall claim, which is now "the default backend never crossed a frame; OPFS
+crossed it in three of six runs" rather than a single number from a single run.

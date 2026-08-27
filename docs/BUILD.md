@@ -108,18 +108,28 @@ loudly at the smoke-test stage rather than mysteriously later.
 
 ```bash
 npm run typecheck
-npm test                      # 49 tests; kernel tests skip if unbuilt
+npm test                      # 114 tests; kernel tests skip if unbuilt
 npm run verify:browser        # drives the real app in Chrome (WebGPU)
 npm run verify:browser:webgl  # same, forcing the WebGL2 fallback
+npm run verify:storage        # storage conformance against real IndexedDB and OPFS
+npm run verify:dist           # builds, then drives dist/ served statically
 npm run kernel:size           # payload measurements
 ```
 
-`npm run verify` chains typecheck, tests, and the browser run.
+`npm run verify` chains typecheck, tests, the browser run, and the dist run.
 
 Browser verification uses `playwright-core` against the **installed system
 Chrome**, so no browser binaries are downloaded. It exercises the parts node
-tests cannot reach: the render path, the WebGPU/WebGL2 choice, GPU upload, and
-picking. It writes screenshots and JSON to `measurements/`.
+tests cannot reach: the render path, the WebGPU/WebGL2 choice, GPU upload,
+picking, browser storage, and recovery across a real page reload. It writes
+screenshots and JSON to `measurements/`.
+
+Three of those runs need a browser for different reasons, and none substitutes
+for another. `verify:browser` is the wide one — geometry, rendering, and the
+persistence measurements. `verify:storage` runs one conformance suite against
+real IndexedDB and real OPFS, whose transaction, quota, and file-handle behavior
+is the whole point and cannot be faked. `verify:dist` is the only one that says
+anything about a build.
 
 ## Known environment issues
 
@@ -151,3 +161,14 @@ person does not rediscover them.
 - **OCCT 8.x deprecations**: `Standard_Failure::GetMessageString()`,
   `Standard_True`, and `Standard_False` are all deprecated. Use `what()`, `true`,
   and `false`.
+- **A browser run can time out navigating to the dev server.** The symptom is
+  `page.goto: Timeout 30000ms exceeded` with a dev server that is up and serving
+  every module in milliseconds when probed by hand. The first request transforms
+  the whole module graph and pre-bundles three.js, and on a loaded machine that
+  has taken over 30 s; the scripts now allow 60 s. If it persists, delete
+  `node_modules/.vite` — a run that had two Vite servers on the same port at once
+  recovered only after the optimizer cache was cleared, which is a weaker claim
+  than a diagnosis but was reproducible three times.
+- **`bash` may not be on `PATH` on Windows.** The `scripts/*.sh` builds need Git
+  Bash; prepend its `bin` directory (e.g. `C:\Program Files\Git\bin`) to `PATH`
+  before invoking them. The Node-based scripts have no such requirement.

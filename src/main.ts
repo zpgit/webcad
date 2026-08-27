@@ -1,5 +1,6 @@
 import { buildDemoScene } from './app/demo-scene.ts';
 import { ModelingSession } from './app/modeling-session.ts';
+import { RECOVERY_PHASES, measureSince, nextAnimationFrame } from './app/timing.ts';
 import type { ConstructionEntry } from './document/types.ts';
 import { Kernel } from './kernel/kernel.ts';
 import { KernelError } from './kernel/errors.ts';
@@ -60,6 +61,10 @@ async function main(): Promise<void> {
     );
     return;
   }
+
+  // From the time origin: this is WebAssembly startup, and keeping it as its own
+  // phase is what stops it being charged to the document layer further down.
+  measureSince(RECOVERY_PHASES.kernelReady, 0);
 
   const status = element('doc-status');
   const say = (message: string, tone: 'success' | 'warning' | 'failure' | ''): void => {
@@ -363,7 +368,20 @@ async function main(): Promise<void> {
   // make the modeller unusable.
   try {
     const restored = await session.restoreLastOpened();
-    if (restored !== null) viewport.fitToView();
+    if (restored !== null) {
+      viewport.fitToView();
+
+      // The frame that actually draws the restored geometry, and the total a
+      // user waits for. Measured here rather than inside the session because
+      // "on screen" is a renderer fact, not a document one - and left
+      // unrecorded if no frame arrives, so an unmeasured phase never reads as
+      // an instant one.
+      const uploaded = performance.now();
+      if (await nextAnimationFrame()) {
+        measureSince(RECOVERY_PHASES.firstFrame, uploaded);
+        measureSince(RECOVERY_PHASES.total, 0);
+      }
+    }
   } catch (error) {
     say(
       `The document you had open could not be reopened. ${

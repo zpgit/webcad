@@ -12,6 +12,7 @@ import type {
 } from '../kernel/types.ts';
 import type { DocumentStore, DocumentSummary } from '../storage/types.ts';
 import type { Viewport } from '../viewport/viewport.ts';
+import { RECOVERY_PHASES, timePhase } from './timing.ts';
 
 export type SessionEvent =
   | { kind: 'created'; bodyId: BodyId }
@@ -201,19 +202,29 @@ export class ModelingSession {
    * session exactly as it was, which is the whole point - a user who tries to
    * open a damaged file must not lose the model they already had. The cost is
    * that both documents' geometry is resident for a moment.
+   *
+   * The three phases are timed where they happen, because that is the only
+   * place they can be told apart: from outside, reading, restoring, and
+   * re-tessellating are one await.
    */
   async open(documentId: string): Promise<OpenedDocument> {
     const store = this.#requireStore('open');
 
-    const parts = await store.read(documentId);
-    const opened = await readDocument(parts, this.#kernel);
+    const parts = await timePhase(RECOVERY_PHASES.documentRead, () =>
+      store.read(documentId),
+    );
+    const opened = await timePhase(RECOVERY_PHASES.geometryRestore, () =>
+      readDocument(parts, this.#kernel),
+    );
 
     await this.#clear();
 
     this.#draft = DocumentDraft.fromOpened(opened);
-    for (const bodyId of opened.bodies.values()) {
-      await this.#render(bodyId);
-    }
+    await timePhase(RECOVERY_PHASES.tessellate, async () => {
+      for (const bodyId of opened.bodies.values()) {
+        await this.#render(bodyId);
+      }
+    });
     await store.setLastOpened(documentId);
 
     this.#emit({

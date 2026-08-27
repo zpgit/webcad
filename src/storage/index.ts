@@ -11,9 +11,20 @@ import type { DocumentStore, StorageBackend } from './types.ts';
 /**
  * The backend the application uses unless told otherwise.
  *
- * Provisional until the measurements exist. IndexedDB is the starting point
- * because its atomicity is a transaction rather than a scheme this codebase
- * had to invent, which makes it the safer thing to be wrong about.
+ * IndexedDB, now on the measurements rather than provisionally
+ * (`measurements/document.json`, and `docs/MVP-1-FINDINGS.md` for the argument).
+ * On the same 459 kB document it beat OPFS on every operation - save 1.5 ms
+ * against 12.1, read 1.1 against 7.2, open 9.6 against 17.1, and listing 0.41
+ * against 10.8 - while also storing the document once rather than twice, staying
+ * inside a frame of main-thread stall in every run where OPFS did not, and
+ * getting its atomicity from a transaction rather than from the two-generation
+ * scheme the OPFS backend had to invent.
+ *
+ * What would change it: checkpoints large enough that holding one as a single
+ * IndexedDB value is the problem, or moving persistence into the Worker, where
+ * OPFS gains `createSyncAccessHandle` and can stream instead of copying. Both
+ * are MVP-2 questions, and `OpfsStore` stays in the tree to be re-measured
+ * against them.
  */
 export const DEFAULT_BACKEND: StorageBackend = 'indexeddb';
 

@@ -296,7 +296,11 @@ try {
   });
 
   console.log(`Opening ${origin} ...`);
-  await page.goto(origin, { waitUntil: 'load' });
+  // 60 s rather than the 30 s default: the dev server transforms the whole
+  // module graph and pre-bundles three.js on the first request, and on a busy
+  // machine that has taken longer than 30 s - which arrives as a navigation
+  // timeout that looks like a broken app rather than a slow one.
+  await page.goto(origin, { waitUntil: 'load', timeout: 60_000 });
 
   // The fatal panel is how the app reports an unsupported environment or a
   // missing kernel; surfacing its text beats a timeout further down.
@@ -688,6 +692,122 @@ try {
     );
   }
 
+  // What persistence costs.
+  //
+  // The measurement itself lives in `tests/browser/document-measurements.ts`,
+  // loaded through the dev server so it runs against the real kernel, the real
+  // document layer, and both real stores. This is the harness: it drives that
+  // module and turns what it returns into findings and thresholds.
+  //
+  // It runs before the reload section below, which navigates away and takes the
+  // session with it.
+  console.log('Measuring serialization, storage, and persistence stalls...');
+  const documents = await page.evaluate(async () => {
+    const { measureDocumentPersistence } = await import(
+      '/tests/browser/document-measurements.ts'
+    );
+    return measureDocumentPersistence(window.__webcad.kernel);
+  });
+
+  const kb = (bytes) => `${(bytes / 1024).toFixed(1)} kB`;
+
+  for (const sample of documents.serialization) {
+    note(
+      `${sample.label}: ${sample.bodyCount} ` +
+        `${sample.bodyCount === 1 ? 'body' : 'bodies'}, ${sample.faceCount} faces, ` +
+        `${kb(sample.bytes)} — serialize ${sample.serialize.medianMs.toFixed(2)} ms ` +
+        `(${sample.serializeKbPerMs} kB/ms), restore ` +
+        `${sample.restore.medianMs.toFixed(2)} ms (${sample.restoreKbPerMs} kB/ms)`,
+    );
+  }
+
+  // Throughput "as a function of size" needs the ladder to actually span sizes.
+  // Without this the artifact could report five points that are all the same
+  // size and the findings would be extrapolating from one.
+  const payloadSizes = documents.serialization.map((s) => s.bytes);
+  const spread = Math.max(...payloadSizes) / Math.min(...payloadSizes);
+  note(
+    `payload ladder spans ${kb(Math.min(...payloadSizes))} to ` +
+      `${kb(Math.max(...payloadSizes))} (${spread.toFixed(0)}x)`,
+  );
+  if (spread < 10) {
+    throw new Error(
+      `the payload ladder only spans ${spread.toFixed(1)}x, which cannot support ` +
+        'a claim about throughput as a function of size',
+    );
+  }
+
+  if (documents.unavailableBackends.length > 0) {
+    throw new Error(
+      'a storage backend could not be measured, so the default cannot be ' +
+        `chosen on evidence: ${documents.unavailableBackends
+          .map((b) => `${b.backend} (${b.reason})`)
+          .join(', ')}`,
+    );
+  }
+
+  for (const sample of documents.storage) {
+    note(
+      `${sample.backend} / ${sample.workload} (${kb(sample.bytes)}): ` +
+        `save ${sample.save.medianMs.toFixed(2)} ms, ` +
+        `read ${sample.read.medianMs.toFixed(2)} ms, ` +
+        `open ${sample.open.medianMs.toFixed(2)} ms, ` +
+        `list ${sample.list.medianMs.toFixed(2)} ms, ` +
+        `remove ${sample.remove.medianMs.toFixed(2)} ms`,
+    );
+  }
+
+  // Listing must not scale with checkpoint size: the document list is UI, and a
+  // store that reads a checkpoint to show a name would make opening the list
+  // cost what opening a document costs.
+  for (const backend of ['indexeddb', 'opfs']) {
+    const samples = documents.storage.filter((s) => s.backend === backend);
+    const worstList = Math.max(...samples.map((s) => s.list.medianMs));
+    if (worstList > FRAME_MS) {
+      note(
+        `finding: listing documents on ${backend} costs ${worstList.toFixed(2)} ms, ` +
+          'over a frame',
+      );
+    }
+  }
+
+  for (const stall of documents.stalls) {
+    // A null backend means the probe is not attributable to storage at all -
+    // the restore-only one, which answers the Worker spec's responsiveness
+    // requirement rather than the storage spec's.
+    const who = stall.backend ?? 'kernel';
+    note(
+      `${who} ${stall.label}${stall.bytes > 0 ? ` (${kb(stall.bytes)})` : ''}: ` +
+        `${stall.wallMs.toFixed(1)} ms wall over ${stall.iterations}x, ` +
+        `worst main-thread stall ${stall.worstStallMs.toFixed(1)} ms ` +
+        `(median ${stall.medianStallMs.toFixed(1)} ms over ${stall.samples} samples)`,
+    );
+    if (stall.label === 'idle baseline') continue;
+    if (stall.samples < 5) {
+      throw new Error(
+        `too few main-thread samples during ${who} ${stall.label}; the ` +
+          'responsiveness measurement is inconclusive rather than passing',
+      );
+    }
+    // One frame is a finding, three frames is a failure - the same bound the
+    // Worker stage set for kernel operations. Persistence must not reintroduce
+    // the stall that moving the kernel off the main thread removed.
+    if (stall.worstStallMs > 3 * FRAME_MS) {
+      throw new Error(
+        `${who} ${stall.label} stalled the main thread for ` +
+          `${stall.worstStallMs.toFixed(1)} ms on a ${kb(stall.bytes)} document ` +
+          `(limit ${(3 * FRAME_MS).toFixed(1)} ms)`,
+      );
+    }
+    if (stall.worstStallMs > FRAME_MS) {
+      note(
+        `finding: ${who} ${stall.label} stalled the main thread for ` +
+          `${stall.worstStallMs.toFixed(1)} ms on a ${kb(stall.bytes)} document, ` +
+          'over one frame budget',
+      );
+    }
+  }
+
   // Save, reload, and see the model come back.
   //
   // This is MVP-1's actual question, and it can only be asked of a real browser
@@ -800,6 +920,140 @@ try {
       .join(', ')})`,
   );
 
+  // Phased recovery.
+  //
+  // The phase names come from the application rather than being repeated here,
+  // so a renamed phase breaks the import instead of silently reporting null.
+  // Each phase is measured where it happens - from outside, reading, restoring,
+  // and re-tessellating are one await.
+  const recovery = await page.evaluate(async () => {
+    const { RECOVERY_PHASES } = await import('/src/app/timing.ts');
+    const durationOf = (name) => {
+      const entries = performance.getEntriesByName(name);
+      const last = entries[entries.length - 1];
+      return last === undefined ? null : Number(last.duration.toFixed(3));
+    };
+    return Object.fromEntries(
+      Object.entries(RECOVERY_PHASES).map(([phase, name]) => [phase, durationOf(name)]),
+    );
+  });
+
+  // Frame cadence, so the first-frame phase can be read honestly: a headless
+  // browser composites lazily, and a 200 ms "first frame" means the compositor
+  // was idle, not that the upload was slow.
+  const frameIntervalMs = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const stamps = [];
+        const timer = setTimeout(() => {
+          resolve(null);
+        }, 5_000);
+        const tick = (stamp) => {
+          stamps.push(stamp);
+          if (stamps.length < 20) {
+            requestAnimationFrame(tick);
+            return;
+          }
+          clearTimeout(timer);
+          const gaps = stamps
+            .slice(1)
+            .map((value, i) => value - stamps[i])
+            .sort((a, b) => a - b);
+          resolve(Number(gaps[Math.floor(gaps.length / 2)].toFixed(3)));
+        };
+        requestAnimationFrame(tick);
+      }),
+  );
+
+  const documentPhases = ['documentRead', 'geometryRestore', 'tessellate'];
+  for (const phase of ['kernelReady', ...documentPhases]) {
+    if (recovery[phase] === null) {
+      throw new Error(
+        `recovery phase "${phase}" was not measured, so the phase breakdown this ` +
+          'stage exists to produce is incomplete',
+      );
+    }
+  }
+
+  const documentTotal = documentPhases.reduce(
+    (sum, phase) => sum + recovery[phase],
+    0,
+  );
+  note(
+    `recovery phases: kernel ready ${recovery.kernelReady.toFixed(0)} ms, ` +
+      `read ${recovery.documentRead.toFixed(1)} ms, ` +
+      `restore ${recovery.geometryRestore.toFixed(1)} ms, ` +
+      `tessellate ${recovery.tessellate.toFixed(1)} ms ` +
+      `(document total ${documentTotal.toFixed(1)} ms)`,
+  );
+
+  if (recovery.firstFrame === null || recovery.total === null) {
+    // Reported rather than treated as zero: an unmeasured phase must not read
+    // as an instant one.
+    note(
+      'NOT MEASURED: no animation frame arrived within the timeout, so the ' +
+        'first-frame phase and the load-to-visible total are absent',
+    );
+  } else {
+    const unattributed =
+      recovery.total - recovery.kernelReady - documentTotal - recovery.firstFrame;
+    note(
+      `recovery total ${recovery.total.toFixed(0)} ms to geometry on screen: ` +
+        `first frame ${recovery.firstFrame.toFixed(1)} ms, ` +
+        `${unattributed.toFixed(0)} ms unattributed (module load, viewport init)` +
+        (frameIntervalMs === null
+          ? ''
+          : `; idle frame interval ${frameIntervalMs.toFixed(1)} ms`),
+    );
+    if (recovery.total < recovery.kernelReady) {
+      throw new Error(
+        'the recovery total is shorter than kernel startup, which means the ' +
+          'phases are not measuring what they claim to',
+      );
+    }
+  }
+
+  // Opening while a session is live must replace it, not accumulate.
+  //
+  // Every other persistence check here starts from a fresh page, where there is
+  // no outgoing session to release - so "reopening does not leak kernel memory"
+  // was the one requirement in the change with no coverage anywhere. Reopening
+  // the document that is already open is the cheapest way to ask it: the
+  // outgoing bodies are real, live, and on screen.
+  const replaced = await page.evaluate(async () => {
+    const { session, kernel, viewport } = window.__webcad;
+    const before = {
+      live: (await kernel.refreshStats()).liveBodyCount,
+      triangles: viewport.totalTriangles,
+    };
+    await session.open(session.document.documentId);
+    return {
+      before,
+      live: (await kernel.refreshStats()).liveBodyCount,
+      triangles: viewport.totalTriangles,
+      documentBodies: session.document.bodies.length,
+      refs: session.document.bodies.map((body) => body.ref),
+    };
+  });
+
+  note(
+    `reopening over a live session: ${replaced.before.live} live bodies before, ` +
+      `${replaced.live} after, ${replaced.documentBodies} in the document ` +
+      `(${replaced.refs.join(', ')}), ${replaced.triangles} triangles`,
+  );
+  if (replaced.live !== replaced.documentBodies) {
+    throw new Error(
+      `the kernel holds ${replaced.live} bodies but the reopened document has ` +
+        `${replaced.documentBodies} - the outgoing session was not released`,
+    );
+  }
+  if (replaced.triangles !== replaced.before.triangles) {
+    throw new Error(
+      `the viewport holds ${replaced.triangles} triangles after reopening, was ` +
+        `${replaced.before.triangles} - the outgoing bodies were left on screen`,
+    );
+  }
+
   // Long operations are still reported, but as latency rather than as dropped
   // frames: with the kernel in a Worker the duration is what the user waits for,
   // not how long the UI was frozen. Main-thread blocking is measured separately.
@@ -864,10 +1118,43 @@ try {
     )}\n`,
   );
 
+  // One artifact for everything about the document layer, so IndexedDB and OPFS
+  // can be compared without joining two files, and so the recovery phases sit
+  // next to the payload sizes that produced them.
+  const documentPath = forceWebgl
+    ? 'measurements/document-webgl2.json'
+    : 'measurements/document.json';
+  writeFileSync(
+    documentPath,
+    `${JSON.stringify(
+      {
+        backend: initial['Backend'],
+        occtVersion: initial['OCCT'],
+        ...documents,
+        recovery: {
+          ...recovery,
+          documentPhasesMs: Number(documentTotal.toFixed(3)),
+          idleFrameIntervalMs: frameIntervalMs,
+          savedBytes: beforeReload.summary.byteLength,
+          bodies: afterReload.infos.length,
+          triangles: afterReload.triangles,
+        },
+        checkpointRoundTrip: {
+          bytes: roundTrip.size,
+          format: roundTrip.format,
+          volumeError: roundTrip.volumeError,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
   console.log('\nBrowser verification PASSED');
   console.log('  screenshots: measurements/viewport-*.png');
   console.log(
-    `  measurements: measurements/${forceWebgl ? 'browser-webgl2' : 'browser'}.json, ${boundaryPath}`,
+    `  measurements: measurements/${forceWebgl ? 'browser-webgl2' : 'browser'}.json, ` +
+      `${boundaryPath}, ${documentPath}`,
   );
 } catch (error) {
   exitCode = 1;

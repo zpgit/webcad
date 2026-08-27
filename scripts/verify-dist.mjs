@@ -152,6 +152,118 @@ try {
   }
   note(`demo scene: ${readout['Live bodies']} bodies, ${readout['Triangles']} triangles`);
 
+  // Persistence across a real restart, in the build.
+  //
+  // The dev-server run already proves this end to end, and proves it more
+  // thoroughly - it can reach into the session and compare body identities. It
+  // cannot prove it of a *build*, which is the failure this whole script exists
+  // for: the document layer's imports are as capable of surviving dev and dying
+  // under a bundler as the kernel loader was. So this asks the narrow question
+  // the build can break, and asks it entirely through the DOM, because the
+  // verification handle is deliberately gone here.
+  console.log('Saving, reloading, and reopening...');
+
+  const readRow = async (label) =>
+    page.evaluate((wanted) => {
+      const list = document.getElementById('measurements');
+      const terms = [...(list?.querySelectorAll('dt') ?? [])];
+      const values = [...(list?.querySelectorAll('dd') ?? [])];
+      const index = terms.findIndex((dt) => dt.textContent === wanted);
+      return index === -1 ? null : (values[index]?.textContent ?? null);
+    }, label);
+
+  const documentName = 'Dist Verification';
+  await page.locator('#doc-name').fill(documentName);
+  // The app commits a rename on `change`, which `fill` alone does not fire.
+  await page.locator('#doc-name').dispatchEvent('change');
+
+  await page.click('#btn-save');
+  await page.waitForFunction(
+    () => (document.getElementById('doc-status')?.textContent ?? '').includes('Saved'),
+    undefined,
+    { timeout: 30_000 },
+  );
+
+  const before = {
+    triangles: await readRow('Triangles'),
+    bodies: await readRow('Live bodies'),
+    history: await page.locator('#history li').count(),
+  };
+  note(`saved “${documentName}”: ${before.bodies} bodies, ${before.history} history entries`);
+
+  await page.reload({ waitUntil: 'load' });
+
+  // Restoration is awaited during startup and reported on the page, so the
+  // status line is the signal - and a failure puts its reason there too, which
+  // beats timing out with nothing to show.
+  await page.waitForFunction(
+    () => {
+      const text = document.getElementById('doc-status')?.textContent ?? '';
+      return text.includes('Opened') || text.includes('could not be reopened');
+    },
+    undefined,
+    { timeout: 60_000 },
+  );
+
+  const status = await page.locator('#doc-status').textContent();
+  if (!status.includes('Opened')) {
+    throw new Error(`the built app did not reopen the document: ${status}`);
+  }
+
+  const after = {
+    name: await page.locator('#doc-name').inputValue(),
+    triangles: await readRow('Triangles'),
+    bodies: await readRow('Live bodies'),
+    history: await page.locator('#history li').count(),
+  };
+
+  note(
+    `reopened after a reload: ${after.bodies} bodies, ${after.triangles} triangles, ` +
+      `${after.history} history entries`,
+  );
+  if (after.name !== documentName) {
+    throw new Error(`reopened as “${after.name}”, not “${documentName}”`);
+  }
+  if (after.bodies !== before.bodies || after.triangles !== before.triangles) {
+    throw new Error(
+      `the restored model differs: ${before.bodies} bodies / ${before.triangles} ` +
+        `triangles became ${after.bodies} / ${after.triangles}`,
+    );
+  }
+  if (after.history !== before.history) {
+    throw new Error(
+      `the construction record did not survive the build's reload: ` +
+        `${before.history} entries became ${after.history}`,
+    );
+  }
+
+  // The recovery instrumentation has to ship, or the phase breakdown describes
+  // only the dev server. Read by prefix rather than by name so this does not
+  // duplicate the phase names it cannot import from a build.
+  const phases = await page.evaluate(() =>
+    performance
+      .getEntriesByType('measure')
+      .filter((entry) => entry.name.startsWith('webcad:'))
+      .map((entry) => `${entry.name.slice('webcad:'.length)} ${entry.duration.toFixed(1)} ms`),
+  );
+  if (phases.length === 0) {
+    throw new Error(
+      'the built app recorded no recovery phases, so the timings the findings ' +
+        'report cannot be reproduced against a build',
+    );
+  }
+  note(`recovery phases recorded in the build: ${phases.join(', ')}`);
+
+  // Deleted so a re-run starts from an empty origin rather than reopening this
+  // document before the demo scene is built.
+  await page.locator('#doc-list li button', { hasText: 'Delete' }).first().click();
+  await page.waitForFunction(
+    () => document.querySelectorAll('#doc-list li').length === 0,
+    undefined,
+    { timeout: 30_000 },
+  );
+  note('document deleted; the origin is left as it was found');
+
   // The verification handle is dev-only. If it survives into dist, the build is
   // not actually a production build and the browser run's findings would not
   // describe what ships.
