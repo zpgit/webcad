@@ -39,9 +39,9 @@ There is no feature history you can edit and no file import. The construction
 record is written and displayed but never replayed; STEP arrives in MVP-2.
 
 - [`docs/MVP-1-FINDINGS.md`](docs/MVP-1-FINDINGS.md) — what persistence costs.
-  Exact B-Rep serializes at 70–112 kB/ms and restores at 46–73 kB/ms; a checkpoint
-  is ~860 bytes per face; IndexedDB beat OPFS on every operation by 1.2–54× and is
-  the default on that evidence; and recovery after a restart is 565 ms, 87% of
+  Exact B-Rep serializes at 70–112 kB/ms and restores at 46–77 kB/ms; a checkpoint
+  is ~860 bytes per face; IndexedDB beat OPFS on every operation by 1.8–45× and is
+  the default on that evidence; and recovery after a restart is 584 ms, 86% of
   which is WASM startup — with re-tessellation, not the checkpoint, dominating
   everything the document layer does.
 - [`docs/MVP-1-WORKER-FINDINGS.md`](docs/MVP-1-WORKER-FINDINGS.md) — what the
@@ -172,13 +172,11 @@ in the build, where the dev-only verification handle does not exist.
 | `openspec/specs/` | what the system is specified to do, by capability |
 | `docs/` | build guide and stage findings |
 
-Requirements live in `openspec/specs/` as six capabilities — `geometry-kernel`,
-`kernel-worker`, `solid-primitives`, `boolean-operations`, `tessellation`, and
-`viewport`. Each opens with the constraint it exists to hold, which is usually
-more useful than the requirements underneath it. Three more —
-`brep-serialization`, `native-document`, and `document-storage` — live in
-`openspec/changes/native-document-checkpoint/specs/` until that change is
-archived.
+Requirements live in `openspec/specs/` as nine capabilities — `geometry-kernel`,
+`kernel-worker`, `solid-primitives`, `boolean-operations`, `tessellation`,
+`viewport`, `brep-serialization`, `native-document`, and `document-storage`. Each
+opens with the constraint it exists to hold, which is usually more useful than
+the requirements underneath it.
 
 ## Roadmap
 
