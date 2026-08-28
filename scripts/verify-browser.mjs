@@ -652,18 +652,46 @@ try {
   const boundary = await measureWorkerBoundary(page);
 
   const FRAME_MS = 1000 / 60;
+  // The baseline is the probe's own noise floor, not a claim about the kernel,
+  // so it is reported and never asserted on - the same call the document
+  // measurements below already make. Two unrelated things leave it without
+  // samples: an environment that throttles timers, and a main thread that
+  // happened to be busy for the whole 150 ms. Neither says anything about where
+  // the kernel runs, and on a shared CI runner both happen.
+  const baselineSamples =
+    boundary.responsiveness.find((probe) => probe.label === 'idle baseline')
+      ?.mainThread?.count ?? 0;
+
   for (const probe of boundary.responsiveness) {
-    if (probe.mainThread === null || probe.mainThread.count < 5) {
-      throw new Error(
-        `too few main-thread samples during ${probe.label}; the responsiveness ` +
-          'measurement is inconclusive rather than passing',
-      );
-    }
+    const samples = probe.mainThread?.count ?? 0;
     note(
       `${probe.label}: ${probe.wallMs.toFixed(1)} ms wall, ` +
-        `worst main-thread stall ${probe.mainThread.maxMs.toFixed(1)} ms ` +
-        `(median ${probe.mainThread.medianMs.toFixed(1)} ms over ${probe.mainThread.count} samples)`,
+        (probe.mainThread === null
+          ? 'no main-thread samples'
+          : `worst main-thread stall ${probe.mainThread.maxMs.toFixed(1)} ms ` +
+            `(median ${probe.mainThread.medianMs.toFixed(1)} ms over ${samples} samples)`),
     );
+    if (probe.label === 'idle baseline') continue;
+
+    if (samples < 5) {
+      // A kernel left on the main thread blocks the probe for the whole
+      // operation, which looks exactly like a probe that could not tick at all
+      // - and the two demand opposite conclusions. The baseline is the
+      // discriminator: if it ticked freely, nothing was wrong with the probe
+      // and the thread really was blocked.
+      throw new Error(
+        baselineSamples < 5
+          ? `too few main-thread samples during ${probe.label}, and the idle ` +
+            `baseline collected only ${baselineSamples} - the probe cannot tick ` +
+            'in this environment, so the measurement is inconclusive rather ' +
+            'than passing'
+          : `only ${samples} main-thread samples during ${probe.label} while ` +
+            `the idle baseline collected ${baselineSamples} - the main thread ` +
+            'was blocked for essentially the whole operation, so the kernel is ' +
+            'not off the main thread',
+      );
+    }
+
     // A main thread still running the kernel would stall for roughly the whole
     // operation, so the two outcomes are far apart; this sits between them with
     // room for scheduler noise on either side.
