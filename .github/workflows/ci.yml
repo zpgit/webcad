@@ -39,9 +39,14 @@ jobs:
       # two different install trees. Keying on the version alone let a tree
       # built without TKDESTEP satisfy a build that needs it, so the key hashes
       # the script that decides.
+      #
+      # Restore and save are separate steps because actions/cache skips its own
+      # save when the job fails -- which is exactly when a 40-minute OCCT build
+      # most needs to be reusable. Saving immediately after the build means a
+      # failure anywhere downstream costs one run, not one run per attempt.
       - name: Cache OCCT install tree
         id: occt-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: native/build/occt-${{ steps.pins.outputs.occt }}-install
           key: occt-${{ steps.pins.outputs.occt }}-emsdk-${{ steps.pins.outputs.emsdk }}-${{ runner.os }}-${{ hashFiles('scripts/build-kernel.sh') }}
@@ -62,6 +67,13 @@ jobs:
       - name: Build OCCT
         if: steps.occt-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-kernel.sh --occt-only
+
+      - name: Save OCCT install tree
+        if: steps.occt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: native/build/occt-${{ steps.pins.outputs.occt }}-install
+          key: occt-${{ steps.pins.outputs.occt }}-emsdk-${{ steps.pins.outputs.emsdk }}-${{ runner.os }}-${{ hashFiles('scripts/build-kernel.sh') }}
 
       - name: Build kernel facade
         run: bash scripts/build-kernel.sh --facade-only
