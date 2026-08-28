@@ -32,12 +32,19 @@ jobs:
       # An OCCT build from scratch is slow enough that an uncached step would
       # discourage running it, so the install tree is cached on the pinned
       # versions. The facade relinks in seconds on a cache hit.
+      #
+      # The configure line is part of the key, not just the versions. Which
+      # toolkits get built, and which flags they are built with, live in
+      # build-kernel.sh -- the same OCCT version configured two ways produces
+      # two different install trees. Keying on the version alone let a tree
+      # built without TKDESTEP satisfy a build that needs it, so the key hashes
+      # the script that decides.
       - name: Cache OCCT install tree
         id: occt-cache
         uses: actions/cache@v4
         with:
           path: native/build/occt-${{ steps.pins.outputs.occt }}-install
-          key: occt-${{ steps.pins.outputs.occt }}-emsdk-${{ steps.pins.outputs.emsdk }}-${{ runner.os }}
+          key: occt-${{ steps.pins.outputs.occt }}-emsdk-${{ steps.pins.outputs.emsdk }}-${{ runner.os }}-${{ hashFiles('scripts/build-kernel.sh') }}
 
       - name: Cache Emscripten SDK
         uses: actions/cache@v4

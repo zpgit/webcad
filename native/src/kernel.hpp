@@ -113,6 +113,52 @@ void discardStaging();
 // The encoding serializeBodies writes, as recorded in a document manifest.
 std::string geometryFormat();
 
+// --- STEP translation ------------------------------------------------------
+
+struct StepTranslationOptions {
+  // OCCT does not translate STEP untouched. Its reader runs ShapeFix and its
+  // writer runs SplitCommonVertex and DirectFaces by default, and both change
+  // the topology and geometry that cross the boundary.
+  //
+  // Defaulted OFF here, which is not OCCT's default and is deliberate: a repair
+  // pass is indistinguishable in the result from a translation loss, so leaving
+  // it on would make this stage's primary measurement unattributable. Whichever
+  // setting the fidelity comparison recommends becomes the application's, and
+  // the result reports which operations actually ran either way.
+  bool shapeProcessing = false;
+};
+
+// Translates the staged payload into bodies, issuing a handle for each.
+//
+// The payload is staged exactly as a checkpoint is - reserveStaging, write,
+// then this call - reusing the single staging buffer rather than adding a
+// second. Unlike a checkpoint these bytes are foreign: the caller obtained them
+// from outside this system, so nothing about them may be trusted, and the
+// difference is in what is validated, not in how they arrive.
+//
+// All-or-nothing: if the payload cannot be read, or produces no usable shape,
+// nothing is registered and no handle is issued. Bodies that existed before the
+// call are untouched in every outcome.
+//
+// A shape that is not a valid closed solid is still registered - real STEP data
+// contains open shells - and is reported in openBodyIds. Refusing them would
+// turn a fidelity finding into an import failure, which reports nothing.
+StepImportResult importStep(const StepTranslationOptions& options);
+
+// Writes the given bodies' current geometry into a STEP payload staged in WASM
+// memory.
+//
+// What is written is the canonical B-Rep as it stands now, so a body edited
+// after it was imported exports with the edit in it. Nothing is tessellated or
+// approximated on the way out: an export is exact geometry in an interchange
+// format, not a mesh.
+//
+// As with serializeBodies, every handle is resolved before anything is written,
+// so a set containing an unknown handle fails having produced no payload, and
+// the inputs are neither released nor mutated.
+StepExportResult exportStep(const std::vector<uint32_t>& bodyIds,
+                            const StepTranslationOptions& options);
+
 KernelStats stats();
 std::string occtVersion();
 

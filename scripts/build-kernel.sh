@@ -51,6 +51,36 @@ build_occt() {
   # the source, and a top-level guard failed that build for no reason.
   [ -d "$OCCT_DIR" ] || die "OCCT source missing - run scripts/fetch-occt.sh"
 
+  # -UOCC_CONVERT_SIGNALS is load-bearing, and the reason is not obvious.
+  #
+  # OCCT's own cmake adds -DOCC_CONVERT_SIGNALS unconditionally for non-MSVC
+  # builds (adm/cmake/occt_defs_flags.cmake:48), which makes OCC_CATCH_SIGNALS
+  # expand to a setjmp. Combined with -fwasm-exceptions that puts wasm EH and
+  # wasm SjLj in the same translation unit, and emscripten 6.0.7 miscompiles the
+  # result: the SjLj lowering rewrites the CFG with a dispatch switch whose
+  # br_table has inconsistent label arity, which is invalid wasm. wasm-ld emits
+  # it happily and the module fails to parse afterwards - "popping from empty
+  # stack" out of wasm-opt, "br_table: label arity inconsistent" out of V8.
+  #
+  # It went unnoticed until MVP-2 because the affected functions were all
+  # dead-stripped. Linking STEP makes OCCT's shape healing reachable, and 150
+  # translation units use the macro - 25 in TKShHealing alone - so this cannot be
+  # worked around per file. Optimization level makes no difference: the same
+  # function is invalid at -O0 through -O3, because the lowering pass runs
+  # regardless.
+  #
+  # Undefining it is safe rather than merely expedient: the mechanism converts
+  # OS signals like SIGSEGV into OCCT exceptions, and a wasm sandbox delivers no
+  # such signals, so it cannot do anything here. OCCT supports its absence
+  # directly - Standard_ErrorHandler.hxx:89 defines OCC_CATCH_SIGNALS as empty.
+  # This lands in $FLAGS, which cmake places after $DEFINES, so the -U wins.
+  #
+  # MVP-2 needs STEP, which lives in the DataExchange module. Turning that module
+  # on would also build IGES, glTF, OBJ, PLY, VRML and STL, and TKDESTEP's
+  # dependencies would pull in the whole of ApplicationFramework. Naming the one
+  # toolkit in BUILD_ADDITIONAL_TOOLKITS instead has OCCT resolve exactly its
+  # dependency closure - the option resolves dependencies automatically - so the
+  # modules below stay OFF deliberately and the narrow selection is preserved.
   log "configuring OCCT ${WEBCAD_OCCT_VERSION} for wasm (this takes a while)"
   emcmake cmake \
     -S "$OCCT_DIR" \
@@ -67,6 +97,7 @@ build_occt() {
     -DBUILD_MODULE_ModelingAlgorithms=ON \
     -DBUILD_MODULE_ApplicationFramework=OFF \
     -DBUILD_MODULE_DataExchange=OFF \
+    -DBUILD_ADDITIONAL_TOOLKITS=TKDESTEP \
     -DBUILD_MODULE_Draw=OFF \
     -DBUILD_MODULE_Visualization=OFF \
     -DBUILD_DOC_Overview=OFF \
@@ -82,7 +113,7 @@ build_occt() {
     -DUSE_FFMPEG=OFF \
     -DUSE_OPENVR=OFF \
     -DUSE_XLIB=OFF \
-    -DCMAKE_CXX_FLAGS="-fwasm-exceptions" \
+    -DCMAKE_CXX_FLAGS="-fwasm-exceptions -UOCC_CONVERT_SIGNALS" \
     || die "OCCT configure failed"
 
   log "building OCCT with $JOBS jobs"

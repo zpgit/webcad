@@ -18,6 +18,9 @@ import type {
   KernelStats,
   MeshMeta,
   OperationRecord,
+  StepExportReport,
+  StepImportReport,
+  StepTranslationOptions,
   TessellationOptions,
 } from '../types.ts';
 
@@ -41,7 +44,43 @@ export type KernelRequest =
   | { readonly kind: 'faceTypeSummary'; readonly bodyId: number }
   | { readonly kind: 'serialize'; readonly bodyIds: readonly number[] }
   | { readonly kind: 'restore'; readonly payload: Uint8Array }
+  | {
+      readonly kind: 'importStep';
+      readonly payload: Uint8Array;
+      readonly options: StepTranslationOptions;
+    }
+  | {
+      readonly kind: 'exportStep';
+      readonly bodyIds: readonly number[];
+      readonly options: StepTranslationOptions;
+    }
   | { readonly kind: 'stats' };
+
+/**
+ * On the one-payload-in-flight invariant.
+ *
+ * The kernel owns a single staging buffer in either direction, and four request
+ * kinds use it: `serialize`, `restore`, `importStep`, `exportStep`. Nothing here
+ * guards it, because nothing needs to - it holds for two structural reasons
+ * rather than by convention.
+ *
+ * First, requests are strictly serialized. Both transports chain every request
+ * through one promise queue in arrival order (`transport.ts`,
+ * `kernel-worker.ts`), so a second payload request cannot begin while a first
+ * is running.
+ *
+ * Second, and more to the point, staging never spans a request. Each handler
+ * reserves, writes, translates or reads, and discards within its own
+ * synchronous call - on the failure path too. So there is no window in which a
+ * payload is held and a different request could overwrite it.
+ *
+ * This is worth stating because the obvious reading of "one at a time" is that
+ * someone must be counting. Nobody is, and a guard added to look careful would
+ * be dead code that implies a race the design does not permit. If either
+ * property above ever changes - a streaming translation that holds staging
+ * across calls, say - this comment is the warning that the invariant went with
+ * it. `tests/step-translation.test.ts` asserts it from the outside.
+ */
 
 export type RequestKind = KernelRequest['kind'];
 
@@ -54,7 +93,10 @@ export type RequestKind = KernelRequest['kind'];
  * in-process path honest about ownership rather than merely permissive.
  */
 export function requestTransferables(request: KernelRequest): Transferable[] {
-  return request.kind === 'restore'
+  // Both inbound payloads transfer on the same terms. The difference between a
+  // checkpoint and a user's STEP file is what gets validated on the far side,
+  // not how the bytes travel or who owns them afterwards.
+  return request.kind === 'restore' || request.kind === 'importStep'
     ? [request.payload.buffer as ArrayBuffer]
     : [];
 }
@@ -109,6 +151,17 @@ export interface RestoreResult {
   readonly bodyIds: readonly number[];
 }
 
+/**
+ * A STEP translation's outcome.
+ *
+ * The import report carries no bytes - the payload was consumed - while the
+ * export report carries an owned buffer that is transferred to the receiver, as
+ * a serialization does. Both are opaque in the same sense: storable and
+ * measurable, never parsed outside the kernel.
+ */
+export type StepImportResult = StepImportReport;
+export type StepExportResult = StepExportReport;
+
 /** Result type per request kind, so the proxy is checked rather than cast. */
 export interface KernelResults {
   init: InitResult;
@@ -121,6 +174,8 @@ export interface KernelResults {
   faceTypeSummary: FaceTypeSummary;
   serialize: SerializeResult;
   restore: RestoreResult;
+  importStep: StepImportResult;
+  exportStep: StepExportResult;
   stats: KernelStats;
 }
 

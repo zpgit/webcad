@@ -7,7 +7,10 @@
 // names, versions, identity, and integrity.
 //
 // It is also explicitly NOT STEP. Saving does not pass geometry through an
-// interchange schema; STEP is an export concern and arrives in MVP-2.
+// interchange schema. STEP is an import and export concern, and now that both
+// exist the distinction is sharper rather than softer: geometry that arrived
+// from a STEP file is checkpointed in the native encoding like any other, and
+// the file it came from is recorded as provenance, not as a source to re-read.
 
 import type { BooleanKind, BoxOptions, CylinderOptions } from '../kernel/types.ts';
 
@@ -19,7 +22,18 @@ import type { BooleanKind, BoxOptions, CylinderOptions } from '../kernel/types.t
  * *container*, not the geometry encoding inside it and not the OCCT build that
  * wrote it - those are recorded separately and treated differently.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+
+/**
+ * The last version whose documents this build can still read.
+ *
+ * Version 2 added body provenance and the `importStep` construction entry, both
+ * of which are additive: a version 1 document simply has no sources recorded,
+ * and every body in it was authored here, which is what its absence means. So
+ * older documents open rather than being refused - a schema bump is not a reason
+ * to cost someone their geometry.
+ */
+export const MIN_READABLE_SCHEMA_VERSION = 1;
 
 /**
  * Part names, which double as file names for a store that has files.
@@ -89,6 +103,37 @@ export interface KernelProvenance {
   readonly geometryFormat: string;
 }
 
+/**
+ * Where a body came from.
+ *
+ * `authored` means it was built here, out of primitives and Booleans. `imported`
+ * means it was translated from an external file, and carries what that file
+ * said about itself: its name, its format, and the length unit it declared.
+ *
+ * This is provenance and nothing more. It does not restrict what a body can be
+ * used for - an imported body is an ordinary body - and it is never consulted to
+ * reconstruct geometry. In particular `fileName` is a record of where the
+ * geometry came from, NOT a reference to be resolved: opening a document must
+ * never try to find that file again, because the geometry is in the checkpoint
+ * and the file may be long gone.
+ */
+export type BodySource =
+  | { readonly kind: 'authored' }
+  | {
+      readonly kind: 'imported';
+      readonly format: 'step';
+      readonly fileName: string;
+      /**
+       * The unit the source file declared, or `unknown` when it declared none.
+       *
+       * Kept separate from the manifest's `units` on purpose. Conversion happens
+       * once, during translation, at the boundary; by the time geometry reaches
+       * the document it is already in the working unit. So this field records
+       * what the file said, and never contradicts what the document is in.
+       */
+      readonly declaredUnit: string;
+    };
+
 export interface DocumentManifest {
   readonly schemaVersion: number;
   readonly documentId: string;
@@ -96,10 +141,17 @@ export interface DocumentManifest {
   /**
    * The unit the document's numbers are expressed in.
    *
-   * Declared and never converted. The kernel is unitless - MVP-0 numbers are
-   * bare doubles - so this exists to stop a document being silently
-   * unit-ambiguous, and to give STEP import in MVP-2 a field to disagree with
-   * rather than a convention to discover.
+   * Declared and never converted *by this layer*. The kernel is unitless - its
+   * numbers are bare doubles - so this exists to stop a document being silently
+   * unit-ambiguous.
+   *
+   * MVP-1 added this field expecting STEP import to give it something to
+   * disagree with. It does not, and that turned out to be the right answer:
+   * OCCT's reader converts a file's declared unit into the working unit as part
+   * of the transfer, so the conversion happens once, at the boundary, and a
+   * document containing imported geometry has one working unit like any other.
+   * What the file declared is recorded per body in `BodySource` instead, where
+   * it is provenance rather than a competing truth.
    */
   readonly units: 'mm';
   readonly createdAt: string;
@@ -115,6 +167,15 @@ export interface DocumentManifest {
    * checked on open and a mismatch refuses the document.
    */
   readonly bodies: readonly BodyRef[];
+  /**
+   * Where each body came from, keyed by identity.
+   *
+   * Sparse by design: an entry is written only for a body that needs one, and a
+   * body with no entry is `authored`. That is what lets a version 1 document -
+   * which has no sources at all - be read as what it is, a document of bodies
+   * built here, without a migration step.
+   */
+  readonly sources?: Readonly<Record<string, BodySource>>;
   /**
    * The next ordinal to mint.
    *
@@ -150,6 +211,26 @@ export type ConstructionEntry =
       readonly target: BodyRef;
       readonly tool: BodyRef;
       readonly produces: BodyRef;
+    }
+  | {
+      /**
+       * Geometry entered the document from an external file.
+       *
+       * A base feature, in the note's terms (section 6): the imported bodies are
+       * where history starts, and no parametric history is invented behind them.
+       * Later operations are recorded on top of it in the ordinary way.
+       *
+       * Inert in the strongest sense of the word. Every other entry here is
+       * inert because replaying it would need persistent references this system
+       * does not have; this one is inert because there is nothing to replay at
+       * all. The file is not a dependency, and opening a document must not go
+       * looking for it.
+       */
+      readonly op: 'importStep';
+      readonly fileName: string;
+      readonly declaredUnit: string;
+      /** Bodies this import produced, in the order the translation issued them. */
+      readonly produces: readonly BodyRef[];
     }
   | { readonly op: 'release'; readonly body: BodyRef };
 

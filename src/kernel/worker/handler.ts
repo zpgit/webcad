@@ -19,9 +19,14 @@ import type {
   CylinderOptions,
   MeshMeta,
   OperationRecord,
+  StepTranslationOptions,
   TessellationOptions,
 } from '../types.ts';
-import type { KernelModule, KernelModuleFactory } from '../wasm-module.ts';
+import type {
+  KernelModule,
+  KernelModuleFactory,
+  RawStepImportResult,
+} from '../wasm-module.ts';
 import type {
   KernelEnvelope,
   KernelRequest,
@@ -72,6 +77,10 @@ export class KernelHandler {
         return this.#serialize(request.bodyIds);
       case 'restore':
         return this.#restore(request.payload);
+      case 'importStep':
+        return this.#importStep(request.payload, request.options);
+      case 'exportStep':
+        return this.#exportStep(request.bodyIds, request.options);
       case 'stats':
         return { value: this.#require('stats').stats(), transfer: [] };
     }
@@ -428,6 +437,170 @@ export class KernelHandler {
       (_, i) => result.firstBodyId + i,
     );
     return { value: { bodyIds }, transfer: [] };
+  }
+
+  /**
+   * Translates a STEP payload the caller handed over.
+   *
+   * Staged and timed exactly as a restoration is, and for the same reasons. The
+   * difference is not in the mechanics but in the trust: these bytes came from
+   * outside the system, so the kernel validates rather than assumes, and a
+   * failure here is an ordinary outcome rather than a sign of a corrupt
+   * checkpoint.
+   */
+  #importStep(
+    payload: Uint8Array,
+    options: StepTranslationOptions,
+  ): HandlerOutcome {
+    const mod = this.#require('importStep');
+
+    if (payload.byteLength === 0) {
+      throw new InvalidParameterError('payload is empty', 'importStep');
+    }
+
+    // Staging and the write into WASM memory sit inside the timed region
+    // because they are part of what translating costs. A staging failure is
+    // reported out of the callback rather than thrown from inside it, so the
+    // operation is still recorded - a failed operation is logged too.
+    let copyMs = 0;
+    const outcome = this.#timed('importStep', ():
+      | {
+          readonly status: number;
+          readonly staged: false;
+          readonly message: string;
+        }
+      | {
+          readonly status: number;
+          readonly staged: true;
+          readonly result: RawStepImportResult;
+        } => {
+      const staged = mod.reserveStaging(payload.byteLength);
+      if (staged.status !== Status.Ok) {
+        return { status: staged.status, staged: false, message: staged.message };
+      }
+
+      // After reserveStaging, never before: reserving can grow the heap, and
+      // growth detaches every existing view.
+      const copyStarted = performance.now();
+      mod.HEAPU8.set(payload, staged.dataPtr);
+      copyMs = performance.now() - copyStarted;
+
+      const result = mod.importStep({
+        shapeProcessing: options.shapeProcessing ?? false,
+      });
+      // Surfaced so the operation record carries the translation's own status
+      // rather than the staging call's.
+      return { status: result.status, staged: true, result };
+    });
+
+    // Released whatever happened: a multi-megabyte STEP file is the largest
+    // thing this kernel ever holds, and holding it after translation would
+    // double the peak for the rest of the session.
+    mod.discardStaging();
+
+    if (!outcome.staged) {
+      throwForStatus(outcome.status, outcome.message, 'importStep');
+    }
+    const result = outcome.result;
+
+    // A syntactically valid file that yielded nothing this system can hold is a
+    // success reporting zero bodies, not a failure - the same convention a
+    // Boolean that removes all material follows. It stays distinct from a parse
+    // failure, which throws: the caller can tell "your file has no solids in it"
+    // from "your file is not STEP", and only one of those is worth the word
+    // error. `rootShapeCount` and `unregisteredShapeCount` say which shapes were
+    // seen and skipped.
+    if (result.status !== Status.Ok && result.status !== Status.EmptyResult) {
+      throwForStatus(result.status, result.message, 'importStep');
+    }
+
+    this.#annotateRecord({ copyMs, transferBytes: payload.byteLength });
+
+    // The embind vector is backed by WASM memory and frees nothing implicitly.
+    const openBodyIds: number[] = [];
+    try {
+      for (let i = 0; i < result.openBodyIds.size(); i += 1) {
+        const id = result.openBodyIds.get(i);
+        if (id !== undefined) openBodyIds.push(id);
+      }
+    } finally {
+      result.openBodyIds.delete();
+    }
+
+    // Consecutive by construction and verified kernel-side, as for a restore.
+    const bodyIds = Array.from(
+      { length: result.bodyCount },
+      (_, i) => result.firstBodyId + i,
+    );
+
+    return {
+      value: {
+        bodyIds,
+        rootShapeCount: result.rootShapeCount,
+        unregisteredShapeCount: result.unregisteredShapeCount,
+        openBodyIds,
+        declaredUnit: result.declaredUnit,
+        workingUnit: result.workingUnit,
+        unitWasAssumed: result.unitWasAssumed,
+        namedProductCount: result.namedProductCount,
+        styledItemCount: result.styledItemCount,
+        assemblyNodeCount: result.assemblyNodeCount,
+        shapeProcessing: result.shapeProcessing,
+        payloadByteLength: result.payloadByteLength,
+      },
+      transfer: [],
+    };
+  }
+
+  /**
+   * Writes bodies to a STEP payload and copies it into a buffer the caller owns.
+   *
+   * Same shape as `#serialize`, and deliberately so - what differs is the
+   * format, not the discipline. The bytes leave opaque either way.
+   */
+  #exportStep(
+    bodyIds: readonly number[],
+    options: StepTranslationOptions,
+  ): HandlerOutcome {
+    const mod = this.#require('exportStep');
+
+    const list = new mod.BodyIdList();
+    let result;
+    try {
+      for (const id of bodyIds) list.push_back(id);
+      result = this.#timed('exportStep', () =>
+        mod.exportStep(list, {
+          shapeProcessing: options.shapeProcessing ?? false,
+        }),
+      );
+    } finally {
+      list.delete();
+    }
+
+    if (result.status !== Status.Ok) {
+      throwForStatus(result.status, result.message, 'exportStep');
+    }
+
+    const copyStarted = performance.now();
+    const bytes = mod.HEAPU8.slice(
+      result.dataPtr,
+      result.dataPtr + result.byteLength,
+    );
+    const copyMs = performance.now() - copyStarted;
+
+    mod.discardStaging();
+
+    this.#annotateRecord({ copyMs, transferBytes: bytes.byteLength });
+
+    return {
+      value: {
+        bytes,
+        bodyCount: result.bodyCount,
+        unitWritten: result.unitWritten,
+        shapeProcessing: result.shapeProcessing,
+      },
+      transfer: [bytes.buffer as ArrayBuffer],
+    };
   }
 
   // --- Internals -----------------------------------------------------------

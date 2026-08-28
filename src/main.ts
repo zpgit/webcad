@@ -15,6 +15,29 @@ function element<T extends HTMLElement>(id: string): T {
   return found as T;
 }
 
+/**
+ * Hands bytes to the browser as a download.
+ *
+ * The bytes are written through unmodified - what the kernel produced is what
+ * lands on disk. A `Blob` and an object URL rather than the File System Access
+ * API: the latter is not available in every browser this runs in, and a download
+ * needs no permission prompt.
+ */
+function downloadBytes(fileName: string, bytes: Uint8Array): void {
+  const url = URL.createObjectURL(
+    new Blob([bytes as BlobPart], { type: 'application/step' }),
+  );
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  // Revoked on the next turn rather than immediately: revoking synchronously
+  // after click() can cancel the download in some browsers.
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 0);
+}
+
 function showFatal(message: string, detail?: string): void {
   const panel = element('fatal');
   panel.hidden = false;
@@ -137,6 +160,11 @@ async function main(): Promise<void> {
   const docList = element<HTMLUListElement>('doc-list');
   const historyList = element<HTMLOListElement>('history');
   const saveButton = element<HTMLButtonElement>('btn-save');
+  const stepFile = element<HTMLInputElement>('step-file');
+  const stepHeal = element<HTMLInputElement>('step-heal');
+  const stepStatus = element<HTMLParagraphElement>('step-status');
+  const stepNotes = element<HTMLUListElement>('step-notes');
+  const exportButton = element<HTMLButtonElement>('btn-export');
 
   const kb = (bytes: number): string => `${(bytes / 1024).toFixed(1)} kB`;
 
@@ -148,6 +176,11 @@ async function main(): Promise<void> {
         return `${entry.produces} = cylinder r${entry.params.radius} h${entry.params.height}`;
       case 'boolean':
         return `${entry.produces} = ${entry.target} ${entry.kind} ${entry.tool}`;
+      case 'importStep':
+        return (
+          `${entry.produces.join(', ')} = imported from ${entry.fileName}` +
+          ` (declared ${entry.declaredUnit})`
+        );
       case 'release':
         return `${entry.body} removed`;
     }
@@ -244,6 +277,23 @@ async function main(): Promise<void> {
       hint.textContent = event.message;
     } else if (event.kind === 'saved') {
       say(`Saved “${event.name}” (${kb(event.byteLength)}).`, 'success');
+    } else if (event.kind === 'imported') {
+      stepStatus.textContent =
+        `Imported ${event.bodyCount} ${event.bodyCount === 1 ? 'body' : 'bodies'} ` +
+        `from ${event.fileName} (${kb(event.byteLength)}).`;
+      stepStatus.className = event.notes.length === 0 ? 'hint success' : 'hint warning';
+      stepNotes.replaceChildren(
+        ...event.notes.map((note) => {
+          const item = document.createElement('li');
+          item.textContent = note;
+          return item;
+        }),
+      );
+    } else if (event.kind === 'exported') {
+      stepStatus.textContent =
+        `Exported ${event.bodyCount} ${event.bodyCount === 1 ? 'body' : 'bodies'} ` +
+        `to ${event.fileName} (${kb(event.byteLength)}).`;
+      stepStatus.className = 'hint success';
     } else if (event.kind === 'opened') {
       const warnings = event.warnings.join(' ');
       say(
@@ -259,6 +309,72 @@ async function main(): Promise<void> {
 
   docName.addEventListener('change', () => {
     session.rename(docName.value.trim() === '' ? 'Untitled' : docName.value.trim());
+  });
+
+  // --- Interchange UI --------------------------------------------------------
+
+  // One translation at a time. The kernel serializes requests anyway, so this is
+  // not about correctness - it is about not letting a user queue three imports of
+  // a 2 MB file by clicking while the first is still running.
+  let translating = false;
+  const setTranslating = (running: boolean): void => {
+    translating = running;
+    stepFile.disabled = running;
+    exportButton.disabled = running;
+    stepFile.parentElement?.setAttribute('aria-disabled', String(running));
+  };
+
+  stepFile.addEventListener('change', () => {
+    const file = stepFile.files?.[0];
+    if (file === undefined || translating) return;
+
+    void (async () => {
+      setTranslating(true);
+      stepStatus.textContent = `Translating ${file.name} (${kb(file.size)})…`;
+      stepStatus.className = 'hint';
+      stepNotes.replaceChildren();
+      try {
+        // Read as bytes and hand them straight over. The main thread never
+        // parses a line of STEP: that is the kernel's job, in the Worker, which
+        // is what keeps a multi-megabyte translation off this thread.
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        await session.importStep(file.name, bytes, {
+          shapeProcessing: stepHeal.checked,
+        });
+      } catch (error) {
+        // The session is untouched by a failed import, so the only thing to do
+        // is say why and leave everything where it was.
+        stepStatus.textContent =
+          error instanceof KernelError ? error.message : String(error);
+        stepStatus.className = 'hint failure';
+      } finally {
+        setTranslating(false);
+        // Cleared so choosing the same file again re-fires `change`.
+        stepFile.value = '';
+        renderHistory();
+        refresh();
+      }
+    })();
+  });
+
+  exportButton.addEventListener('click', () => {
+    if (translating) return;
+    void (async () => {
+      setTranslating(true);
+      try {
+        const { fileName, bytes } = await session.exportStep({
+          shapeProcessing: stepHeal.checked,
+        });
+        downloadBytes(fileName, bytes);
+      } catch (error) {
+        stepStatus.textContent =
+          error instanceof KernelError ? error.message : String(error);
+        stepStatus.className = 'hint failure';
+      } finally {
+        setTranslating(false);
+        refresh();
+      }
+    })();
   });
 
   saveButton.addEventListener('click', () => {

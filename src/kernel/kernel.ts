@@ -16,6 +16,9 @@ import type {
   MeshBuffers,
   MeshMeta,
   OperationRecord,
+  StepExportReport,
+  StepImportReport,
+  StepTranslationOptions,
   TessellationOptions,
 } from './types.ts';
 import { asBodyId } from './types.ts';
@@ -30,6 +33,8 @@ import type {
   ResponseTail,
   RestoreResult,
   SerializeResult,
+  StepExportResult,
+  StepImportResult,
 } from './worker/protocol.ts';
 import { InProcessTransport, type Transport } from './worker/transport.ts';
 import { WorkerTransport } from './worker/worker-transport.ts';
@@ -287,6 +292,60 @@ export class Kernel {
       payload,
     });
     return result.bodyIds.map(asBodyId);
+  }
+
+  // --- STEP translation ----------------------------------------------------
+
+  /**
+   * Translates a STEP file's bytes into bodies.
+   *
+   * The bodies that come back are ordinary bodies. Nothing marks them as
+   * imported inside the kernel, nothing restricts what they can be used for,
+   * and the report says what could not come with them - assembly structure,
+   * names and colours, which need XCAF and are not this stage's.
+   *
+   * Shape processing is off by default, which is *not* OCCT's default: its
+   * reader repairs geometry on the way in, and a repair is indistinguishable in
+   * the result from a translation loss. Pass `shapeProcessing: true` to get the
+   * library's behaviour, and read `report.shapeProcessing` to see what ran.
+   *
+   * **The payload's buffer is transferred and becomes unusable here**, exactly
+   * as for `restore`. A caller that needs to keep the file's bytes - to save
+   * them alongside the import, say - must copy first.
+   */
+  async importStep(
+    payload: Uint8Array,
+    options: StepTranslationOptions = {},
+  ): Promise<StepImportReport> {
+    this.#require('importStep');
+    return this.#dispatch<StepImportResult>({
+      kind: 'importStep',
+      payload,
+      options,
+    });
+  }
+
+  /**
+   * Writes the given bodies' current geometry to STEP bytes.
+   *
+   * Current is the operative word: a body that was imported and then cut
+   * exports with the cut in it. Nothing is tessellated or approximated on the
+   * way out.
+   *
+   * The returned bytes are the caller's to own, and are the only payload here
+   * that is meant to leave the system - a checkpoint is ours, a STEP file is
+   * for somebody else's CAD.
+   */
+  async exportStep(
+    bodyIds: readonly BodyId[],
+    options: StepTranslationOptions = {},
+  ): Promise<StepExportReport> {
+    this.#require('exportStep');
+    return this.#dispatch<StepExportResult>({
+      kind: 'exportStep',
+      bodyIds: [...bodyIds],
+      options,
+    });
   }
 
   // --- Lifetime and inspection --------------------------------------------

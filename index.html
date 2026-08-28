@@ -12,7 +12,7 @@
       <canvas id="viewport"></canvas>
 
       <aside id="panel">
-        <h1>Web CAD <span class="stage">MVP-1</span></h1>
+        <h1>Web CAD <span class="stage">MVP-2</span></h1>
 
         <section>
           <h2>Document</h2>
@@ -23,6 +23,28 @@
           </div>
           <p class="hint" id="doc-status"></p>
           <ul id="doc-list"></ul>
+        </section>
+
+        <section>
+          <h2>Interchange</h2>
+          <div class="row">
+            <label class="file-button">
+              Import STEP
+              <input
+                id="step-file"
+                type="file"
+                accept=".step,.stp,application/step"
+                aria-label="Import a STEP file"
+              />
+            </label>
+            <button id="btn-export" type="button">Export STEP</button>
+          </div>
+          <label class="check">
+            <input id="step-heal" type="checkbox" />
+            Run OCCT shape healing on import
+          </label>
+          <p class="hint" id="step-status"></p>
+          <ul id="step-notes"></ul>
         </section>
 
         <section>

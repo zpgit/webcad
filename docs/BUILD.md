@@ -161,6 +161,13 @@ person does not rediscover them.
 - **OCCT 8.x deprecations**: `Standard_Failure::GetMessageString()`,
   `Standard_True`, and `Standard_False` are all deprecated. Use `what()`, `true`,
   and `false`.
+- **`page.waitForFunction` takes its options as the THIRD argument.** The
+  signature is `(pageFunction, arg, options)`, so `waitForFunction(fn, { timeout:
+  60_000 })` passes the options object as `arg` and silently keeps Playwright's
+  30 s default. Every wait in `verify-browser.mjs` was written that way, which
+  meant the 60 s allowance below was never actually in effect - it surfaced only
+  when MVP-2 nearly doubled the `.wasm` and startup crossed 30 s. Pass `undefined`
+  in between.
 - **A browser run can time out navigating to the dev server.** The symptom is
   `page.goto: Timeout 30000ms exceeded` with a dev server that is up and serving
   every module in milliseconds when probed by hand. The first request transforms

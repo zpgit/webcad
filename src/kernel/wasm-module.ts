@@ -132,6 +132,42 @@ export interface RawTessellationParams {
   angularDeflection: number;
 }
 
+export interface RawStepTranslationOptions {
+  shapeProcessing: boolean;
+}
+
+/**
+ * `openBodyIds` arrives as an embind vector, not a JavaScript array: it is
+ * backed by WASM memory and has to be read and freed like `BodyIdList`.
+ */
+export interface RawStepImportResult {
+  status: number;
+  message: string;
+  firstBodyId: number;
+  bodyCount: number;
+  rootShapeCount: number;
+  unregisteredShapeCount: number;
+  openBodyIds: RawBodyIdList & { get(index: number): number | undefined };
+  declaredUnit: string;
+  workingUnit: string;
+  unitWasAssumed: boolean;
+  namedProductCount: number;
+  styledItemCount: number;
+  assemblyNodeCount: number;
+  shapeProcessing: string;
+  payloadByteLength: number;
+}
+
+export interface RawStepExportResult {
+  status: number;
+  message: string;
+  dataPtr: number;
+  byteLength: number;
+  bodyCount: number;
+  unitWritten: string;
+  shapeProcessing: string;
+}
+
 export interface KernelModule {
   createBox(params: RawBoxParams): RawOpResult;
   createCylinder(params: RawCylinderParams): RawOpResult;
@@ -152,6 +188,16 @@ export interface KernelModule {
   restoreBodies(): RawRestoreResult;
   discardStaging(): void;
   geometryFormat(): string;
+
+  // STEP translation reuses the staging buffer above rather than adding a
+  // second: import reads what the caller staged, export leaves its payload
+  // there to be copied out. The bytes going in are foreign - they came off a
+  // user's disk - so nothing about them is assumed here.
+  importStep(options: RawStepTranslationOptions): RawStepImportResult;
+  exportStep(
+    bodyIds: RawBodyIdList,
+    options: RawStepTranslationOptions,
+  ): RawStepExportResult;
 
   // IMPORTANT: Emscripten replaces these views whenever linear memory grows.
   // They must be read fresh at every use and never cached - a retained view

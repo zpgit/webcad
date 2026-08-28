@@ -20,6 +20,7 @@ export const Status = {
   InvalidParameter: 2,
   KernelOperationFailed: 3,
   EmptyResult: 4,
+  TranslationFailed: 5,
 } as const;
 
 export type StatusCode = (typeof Status)[keyof typeof Status];
@@ -110,6 +111,22 @@ export class KernelOperationFailedError extends KernelError {
 }
 
 /**
+ * A foreign interchange payload could not be translated.
+ *
+ * Distinct from `KernelOperationFailed` on purpose. That one means a geometry
+ * algorithm failed on data this kernel produced, which is the kernel's problem.
+ * This one usually means the file was not what it claimed to be, which is the
+ * user's - and the two want different words in the interface.
+ */
+export class StepTranslationError extends KernelError {
+  readonly code = 'StepTranslationFailed';
+
+  constructor(message: string, operation: string) {
+    super(message, operation, `${operation}: ${message}`);
+  }
+}
+
+/**
  * The kernel is gone: the Worker was disposed, or it died with work in flight.
  *
  * Distinct from `KernelNotReady`, which means "not yet". This one means the
@@ -143,6 +160,8 @@ export function throwForStatus(
       throw new InvalidParameterError(message, operation);
     case Status.KernelOperationFailed:
       throw new KernelOperationFailedError(message, operation);
+    case Status.TranslationFailed:
+      throw new StepTranslationError(message, operation);
     default:
       throw new KernelOperationFailedError(
         `unexpected status ${status}: ${message}`,
@@ -209,6 +228,8 @@ function construct(failure: KernelFailure): KernelError {
       return new KernelTerminatedError(message, operation);
     case 'KernelOperationFailed':
       return new KernelOperationFailedError(message, operation);
+    case 'StepTranslationFailed':
+      return new StepTranslationError(message, operation);
     default:
       return new KernelOperationFailedError(
         `unrecognized kernel error code "${code}": ${message}`,

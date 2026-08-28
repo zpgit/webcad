@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cstdint>
+#include <vector>
 
 // Status convention for every facade entry point.
 //
@@ -31,6 +32,17 @@ enum class Status : int32_t {
   // "no geometry" from "operation failed", because conflating them would make
   // a valid direct-modeling outcome look like a bug.
   EmptyResult = 4,
+
+  // A foreign interchange payload could not be translated: it was not the
+  // format it claimed, was truncated, or the writer could not express the
+  // geometry it was given.
+  //
+  // Distinct from KernelOperationFailed, which means a geometry algorithm
+  // failed on data this kernel produced. This one is ordinarily the user's
+  // file being wrong, which is a different thing to report and a different
+  // thing to act on - the application can say "that is not a STEP file"
+  // instead of "something went wrong".
+  TranslationFailed = 5,
 };
 
 // Result of an operation that produces a body.
@@ -159,6 +171,82 @@ struct SerializeResult {
 
   std::string format;
   std::string occtVersion;
+};
+
+// Result of translating a STEP payload into bodies.
+//
+// Everything here is a count, a scalar, or a name. No STEP entity, product
+// node, or attribute record crosses the boundary: a caller learns what arrived
+// the same way it learns about a body it created, and cannot reach the
+// interchange representation behind it.
+//
+// Handles are reported as a first identifier and a count, as in RestoreResult,
+// and for the same verified reason: the registry issues them consecutively.
+struct StepImportResult {
+  int32_t status = static_cast<int32_t>(Status::Ok);
+  std::string message;
+
+  uint32_t firstBodyId = 0;
+  uint32_t bodyCount = 0;
+
+  // What the file offered against what became a body. A root the reader
+  // declared but that could not be registered is counted rather than dropped
+  // silently, so "the file had more in it than this" is always visible.
+  uint32_t rootShapeCount = 0;
+  uint32_t unregisteredShapeCount = 0;
+
+  // Bodies that were registered but are not valid closed solids - open shells
+  // and shapes that fail BRepCheck, which real STEP data contains. They are
+  // usable bodies; an operation that needs a solid will fail on its own terms.
+  // Flagged here so a caller knows before it tries.
+  std::vector<uint32_t> openBodyIds;
+
+  // Units. declaredUnit is what the file said, workingUnit is what the bodies
+  // are expressed in, and the conversion between them happened here - once, at
+  // the boundary. An empty declaredUnit with unitWasAssumed set means the file
+  // declared nothing determinable and workingUnit was assumed in its place.
+  std::string declaredUnit;
+  std::string workingUnit;
+  bool unitWasAssumed = false;
+
+  // STEP semantics this stage does not preserve, counted so the loss is stated
+  // rather than discovered. Preserving them needs XCAF and is MVP-3's.
+  uint32_t namedProductCount = 0;
+  uint32_t styledItemCount = 0;
+  uint32_t assemblyNodeCount = 0;
+
+  // Shape-processing operations that actually ran, comma-separated, empty when
+  // none did. OCCT runs FixShape on read by default; a measurement cannot
+  // attribute a difference to translation unless it knows whether this ran.
+  std::string shapeProcessing;
+
+  // The payload's length, so translation cost can be related to input size
+  // without the caller having to remember what it staged.
+  uint32_t payloadByteLength = 0;
+};
+
+// Result of translating bodies into a STEP payload.
+//
+// As with SerializeResult the bytes are opaque - storable, measurable, and
+// returnable, but not parseable outside the kernel. Unlike a checkpoint they
+// are a published interchange format, which is exactly why they are an export
+// and not the native document.
+struct StepExportResult {
+  int32_t status = static_cast<int32_t>(Status::Ok);
+  std::string message;
+
+  // Valid until the next staging call or discardStaging().
+  uint32_t dataPtr = 0;
+  uint32_t byteLength = 0;
+
+  uint32_t bodyCount = 0;
+
+  // The unit the payload declares, reported rather than left implicit.
+  std::string unitWritten;
+
+  // As StepImportResult::shapeProcessing. OCCT's writer runs SplitCommonVertex
+  // and DirectFaces by default, and both change what the file describes.
+  std::string shapeProcessing;
 };
 
 // Result of restoring bodies from a payload.

@@ -6,11 +6,18 @@
 // WASM linear memory. There is deliberately no operation that takes mesh
 // buffers as geometric input - mesh is derived output only.
 //
-// Serialization is the one place exact geometry leaves WASM, and it leaves as
+// Byte payloads are the only place exact geometry crosses, and they cross as
 // opaque bytes: a payload JavaScript may store, measure, and hand back, but
 // which nothing outside the kernel parses. There is deliberately no operation
 // that decodes a payload into anything a caller can inspect, so the bytes
 // cannot become a second geometry representation.
+//
+// There are two such payloads and the difference between them matters. A
+// checkpoint is ours: the caller cannot construct one, only return one we
+// wrote. A STEP payload is foreign - it comes off a user's disk, so nothing
+// about it may be assumed - and it is admitted to translation only, never to a
+// modeling operation. What holds for both is the outbound rule: translation
+// consumes foreign bytes and still returns nothing but handles.
 
 #include <vector>
 
@@ -96,6 +103,32 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("firstBodyId", &RestoreResult::firstBodyId)
       .field("bodyCount", &RestoreResult::bodyCount);
 
+  value_object<StepImportResult>("StepImportResult")
+      .field("status", &StepImportResult::status)
+      .field("message", &StepImportResult::message)
+      .field("firstBodyId", &StepImportResult::firstBodyId)
+      .field("bodyCount", &StepImportResult::bodyCount)
+      .field("rootShapeCount", &StepImportResult::rootShapeCount)
+      .field("unregisteredShapeCount", &StepImportResult::unregisteredShapeCount)
+      .field("openBodyIds", &StepImportResult::openBodyIds)
+      .field("declaredUnit", &StepImportResult::declaredUnit)
+      .field("workingUnit", &StepImportResult::workingUnit)
+      .field("unitWasAssumed", &StepImportResult::unitWasAssumed)
+      .field("namedProductCount", &StepImportResult::namedProductCount)
+      .field("styledItemCount", &StepImportResult::styledItemCount)
+      .field("assemblyNodeCount", &StepImportResult::assemblyNodeCount)
+      .field("shapeProcessing", &StepImportResult::shapeProcessing)
+      .field("payloadByteLength", &StepImportResult::payloadByteLength);
+
+  value_object<StepExportResult>("StepExportResult")
+      .field("status", &StepExportResult::status)
+      .field("message", &StepExportResult::message)
+      .field("dataPtr", &StepExportResult::dataPtr)
+      .field("byteLength", &StepExportResult::byteLength)
+      .field("bodyCount", &StepExportResult::bodyCount)
+      .field("unitWritten", &StepExportResult::unitWritten)
+      .field("shapeProcessing", &StepExportResult::shapeProcessing);
+
   value_object<KernelStats>("KernelStats")
       .field("liveBodyCount", &KernelStats::liveBodyCount)
       .field("totalBodiesCreated", &KernelStats::totalBodiesCreated)
@@ -132,6 +165,12 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("linearDeflection", &TessellationParams::linearDeflection)
       .field("angularDeflection", &TessellationParams::angularDeflection);
 
+  // Shape processing is a caller-visible option rather than a library default,
+  // because OCCT's default alters geometry in both directions and this stage
+  // has to be able to measure with it off.
+  value_object<StepTranslationOptions>("StepTranslationOptions")
+      .field("shapeProcessing", &StepTranslationOptions::shapeProcessing);
+
   // The order of this list is the order bodies are written into a checkpoint,
   // and it is the caller's to decide: the registry stores shapes unordered, so
   // there is no kernel-side ordering a document could pin its identities to.
@@ -151,6 +190,11 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
   function("restoreBodies", &restoreBodies);
   function("discardStaging", &discardStaging);
   function("geometryFormat", &geometryFormat);
+  // Both translation directions reuse the one staging buffer above: import
+  // reads what the caller staged, export leaves its payload there to be copied
+  // out. There is deliberately no second buffer for foreign bytes.
+  function("importStep", &importStep);
+  function("exportStep", &exportStep);
   function("stats", &stats);
   function("occtVersion", &occtVersion);
 

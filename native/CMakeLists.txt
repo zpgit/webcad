@@ -34,9 +34,23 @@ add_executable(webcad_kernel
 target_include_directories(webcad_kernel PRIVATE
   "${OpenCASCADE_INCLUDE_DIR}")
 
-# Only the toolkits MVP-0 needs. DataExchange (STEP) and Visualization are not
-# linked at all - STEP arrives in MVP-2, and rendering happens in JS, not OCCT.
+# Modeling toolkits, plus DataExchange for STEP. Visualization is still not
+# linked at all - rendering happens in JS, not OCCT.
+#
+# TKDESTEP's EXTERNLIB.cmake declares TKXCAF, TKCAF, TKLCAF and TKCDF among its
+# dependencies, so STEP brings the whole XCAF/OCAF stack whether this stage uses
+# it or not. MVP-2 uses none of it - translation is plain STEPControl over
+# TopoDS_Shape, and XCAF document semantics are MVP-3's - but the link line
+# cannot express that, and the size measurement has to include them.
 target_link_libraries(webcad_kernel PRIVATE
+  TKDESTEP    # STEPControl_Reader / _Writer
+  TKDE        # DE_ShapeFixParameters, shape-processing parameters
+  TKXSBase    # XSControl_Reader::ReadStream, Interface_InterfaceModel
+  TKShHealing # pulled by TKDESTEP and TKXSBase; the reader's FixShape lives here
+  TKXCAF      # required by TKDESTEP's link line, unused by this facade
+  TKCAF       #   "
+  TKLCAF      #   "
+  TKCDF       #   "
   TKMesh      # BRepMesh_IncrementalMesh
   TKBO        # BRepAlgoAPI_Fuse / _Cut / _Common
   TKPrim      # BRepPrimAPI_MakeBox / _MakeCylinder

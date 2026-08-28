@@ -11,7 +11,7 @@
 
 import type { BodyId, BooleanKind, BoxOptions, CylinderOptions } from '../kernel/types.ts';
 import type { DocumentContent, OpenedDocument } from './document.ts';
-import type { BodyRef, ConstructionEntry } from './types.ts';
+import type { BodyRef, BodySource, ConstructionEntry } from './types.ts';
 import { bodyRefFor } from './types.ts';
 
 /**
@@ -35,6 +35,7 @@ export interface DraftOptions {
 export class DocumentDraft {
   #bodies: { ref: BodyRef; handle: BodyId }[] = [];
   #entries: ConstructionEntry[] = [];
+  #sources = new Map<BodyRef, BodySource>();
   #nextOrdinal = 1;
   #name: string;
 
@@ -70,6 +71,12 @@ export class DocumentDraft {
       if (handle !== undefined) draft.#bodies.push({ ref, handle });
     }
     draft.#entries = [...(opened.record?.entries ?? [])];
+    // A body with no recorded source was authored here, which is exactly what a
+    // version 1 document means by having no sources at all. So there is nothing
+    // to migrate: the absence is already the right answer.
+    for (const [ref, source] of Object.entries(manifest.sources ?? {})) {
+      draft.#sources.set(ref as BodyRef, source);
+    }
     draft.#nextOrdinal = manifest.nextBodyOrdinal;
     return draft;
   }
@@ -89,6 +96,16 @@ export class DocumentDraft {
 
   get entries(): readonly ConstructionEntry[] {
     return this.#entries;
+  }
+
+  /**
+   * Where a body came from. Authored unless it was recorded otherwise.
+   *
+   * The default is not a guess: bodies are authored here unless an import says
+   * otherwise, so absence carries the same meaning as an explicit entry would.
+   */
+  sourceOf(ref: BodyRef): BodySource {
+    return this.#sources.get(ref) ?? { kind: 'authored' };
   }
 
   refFor(handle: BodyId): BodyRef | undefined {
@@ -131,11 +148,48 @@ export class DocumentDraft {
     return ref;
   }
 
+  /**
+   * Records geometry that arrived from a STEP file, as a base feature.
+   *
+   * One entry for the whole import, naming every identity it produced, because
+   * that is what happened: a file yielded a set of bodies at once. Recording one
+   * entry per body would imply the file could be re-read a body at a time, and
+   * nothing here ever re-reads it.
+   *
+   * The file name and declared unit are provenance. `fileName` is deliberately
+   * not a path and not a handle - a document that reopens must not go looking
+   * for it, because the geometry is in the checkpoint and the file may be gone.
+   */
+  recordImport(
+    handles: readonly BodyId[],
+    file: { readonly fileName: string; readonly declaredUnit: string },
+  ): readonly BodyRef[] {
+    const refs = handles.map((handle) => this.#mint(handle));
+    for (const ref of refs) {
+      this.#sources.set(ref, {
+        kind: 'imported',
+        format: 'step',
+        fileName: file.fileName,
+        declaredUnit: file.declaredUnit,
+      });
+    }
+    this.#entries.push({
+      op: 'importStep',
+      fileName: file.fileName,
+      declaredUnit: file.declaredUnit,
+      produces: refs,
+    });
+    return refs;
+  }
+
   /** Drops a body from the document. Its identity is retired, never reissued. */
   recordRelease(ref: BodyRef): void {
     const index = this.#bodies.findIndex((body) => body.ref === ref);
     if (index === -1) return;
     this.#bodies.splice(index, 1);
+    // The provenance goes with the body. Keeping it would leave the document
+    // asserting where geometry came from that it no longer holds.
+    this.#sources.delete(ref);
     this.#entries.push({ op: 'release', body: ref });
   }
 
@@ -158,6 +212,7 @@ export class DocumentDraft {
       createdAt: this.createdAt,
       bodies: [...this.#bodies],
       entries: [...this.#entries],
+      sources: new Map(this.#sources),
       nextBodyOrdinal: this.#nextOrdinal,
     };
   }

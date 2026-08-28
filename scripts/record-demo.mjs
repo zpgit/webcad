@@ -131,6 +131,7 @@ try {
         const list = document.getElementById('measurements');
         return (list?.textContent ?? '').match(/\d+\.\d+\.\d+/) !== null;
       },
+      undefined,
       { timeout: 120_000 },
     )
     .catch(() => {});
@@ -165,6 +166,7 @@ try {
       const list = document.getElementById('measurements');
       return (list?.textContent ?? '').match(/\d+\.\d+\.\d+/) !== null;
     },
+    undefined,
     { timeout: 60_000 },
   );
 
@@ -189,6 +191,7 @@ try {
       const match = text.match(/Live bodies(\d+)/);
       return match !== null && Number(match[1]) >= 2;
     },
+    undefined,
     { timeout: 60_000 },
   );
   await wait(1200);
@@ -264,6 +267,7 @@ try {
       const match = text.match(/Live bodies(\d+)/);
       return match !== null && Number(match[1]) === 1;
     },
+    undefined,
     { timeout: 60_000 },
   );
   await wait(1400);

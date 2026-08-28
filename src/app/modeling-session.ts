@@ -8,6 +8,8 @@ import type {
   BooleanKind,
   BoxOptions,
   CylinderOptions,
+  StepImportReport,
+  StepTranslationOptions,
   TessellationOptions,
 } from '../kernel/types.ts';
 import type { DocumentStore, DocumentSummary } from '../storage/types.ts';
@@ -20,6 +22,15 @@ export type SessionEvent =
   | { kind: 'empty'; op: BooleanKind; message: string }
   | { kind: 'released'; bodyId: BodyId }
   | { kind: 'saved'; name: string; byteLength: number }
+  | {
+      kind: 'imported';
+      fileName: string;
+      bodyCount: number;
+      byteLength: number;
+      /** What the file carried and this stage did not keep. */
+      notes: readonly string[];
+    }
+  | { kind: 'exported'; fileName: string; bodyCount: number; byteLength: number }
   | { kind: 'opened'; name: string; bodyCount: number; warnings: readonly string[] }
   | { kind: 'document'; name: string }
   | { kind: 'error'; message: string };
@@ -89,6 +100,90 @@ export class ModelingSession {
     await this.#render(bodyId);
     this.#emit({ kind: 'created', bodyId });
     return bodyId;
+  }
+
+  // --- Interchange -----------------------------------------------------------
+
+  /**
+   * Imports a STEP file into the current session.
+   *
+   * Adds to what is there rather than replacing it: an import is not an open.
+   * A user who has modelled something and then imports a part expects both, and
+   * silently discarding their work would be the worse surprise.
+   *
+   * **Consumes `bytes`.** The buffer is transferred into the kernel, so the
+   * caller's view is detached when this returns.
+   *
+   * A failure leaves the session exactly as it was. Nothing here mutates the
+   * draft or the viewport until the translation has come back with bodies.
+   */
+  async importStep(
+    fileName: string,
+    bytes: Uint8Array,
+    options: StepTranslationOptions = {},
+  ): Promise<readonly BodyId[]> {
+    const byteLength = bytes.byteLength;
+    const report = await this.#kernel.importStep(bytes, options);
+
+    if (report.bodyIds.length === 0) {
+      // A readable file that held nothing this system can model. Not an error
+      // from the kernel's point of view, but it is certainly not a success from
+      // the user's, so it is reported as a failed import rather than silently
+      // adding nothing to the screen.
+      this.#emit({
+        kind: 'error',
+        message:
+          `${fileName} contained no solid geometry ` +
+          `(${report.rootShapeCount} shapes declared, ` +
+          `${report.unregisteredShapeCount} unusable).`,
+      });
+      return [];
+    }
+
+    this.#draft.recordImport(report.bodyIds, {
+      fileName,
+      declaredUnit: report.unitWasAssumed ? 'unknown' : report.declaredUnit,
+    });
+
+    for (const bodyId of report.bodyIds) {
+      await this.#render(bodyId);
+    }
+
+    this.#emit({
+      kind: 'imported',
+      fileName,
+      bodyCount: report.bodyIds.length,
+      byteLength,
+      notes: describeImportLosses(report),
+    });
+    return report.bodyIds;
+  }
+
+  /**
+   * Exports the session's bodies as STEP bytes.
+   *
+   * What is exported is the geometry as it stands, which is the point: a body
+   * imported and then cut exports with the cut in it. The bytes are the
+   * caller's - handing them to a download is the UI's job, not this layer's.
+   */
+  async exportStep(
+    options: StepTranslationOptions = {},
+  ): Promise<{ fileName: string; bytes: Uint8Array }> {
+    const bodies = this.#draft.bodies.map((body) => body.handle);
+    if (bodies.length === 0) {
+      throw new Error('There is nothing to export: this document has no bodies.');
+    }
+
+    const report = await this.#kernel.exportStep(bodies, options);
+    const fileName = `${stepFileNameFor(this.#draft.name)}.step`;
+
+    this.#emit({
+      kind: 'exported',
+      fileName,
+      bodyCount: report.bodyCount,
+      byteLength: report.bytes.byteLength,
+    });
+    return { fileName, bytes: report.bytes };
   }
 
   /**
@@ -299,4 +394,57 @@ export class ModelingSession {
   #emit(event: SessionEvent): void {
     for (const listener of this.#listeners) listener(event);
   }
+}
+
+/**
+ * What an import could not bring with it, in words a user can act on.
+ *
+ * Reported rather than hidden because the loss is this stage's, not the file's:
+ * assembly structure, names and colours need XCAF and arrive in MVP-3. Saying so
+ * where the user can see it is the difference between a known limitation and an
+ * apparently broken import.
+ */
+function describeImportLosses(report: StepImportReport): readonly string[] {
+  const notes: string[] = [];
+  if (report.assemblyNodeCount > 0) {
+    notes.push(
+      `Assembly structure was not preserved (${report.assemblyNodeCount} nodes); ` +
+        'parts were imported as separate bodies.',
+    );
+  }
+  if (report.namedProductCount > 0 || report.styledItemCount > 0) {
+    notes.push(
+      `Part names and colours were not preserved ` +
+        `(${report.namedProductCount} products, ${report.styledItemCount} styles).`,
+    );
+  }
+  if (report.openBodyIds.length > 0) {
+    notes.push(
+      `${report.openBodyIds.length} of ${report.bodyIds.length} bodies are not ` +
+        'closed solids; operations needing a solid will fail on those.',
+    );
+  }
+  if (report.unregisteredShapeCount > 0) {
+    notes.push(
+      `${report.unregisteredShapeCount} shapes in the file could not be imported.`,
+    );
+  }
+  if (report.unitWasAssumed) {
+    notes.push(
+      `The file declared no unit; ${report.workingUnit} was assumed.`,
+    );
+  } else if (report.declaredUnit !== report.workingUnit) {
+    notes.push(
+      `Converted from ${report.declaredUnit} to ${report.workingUnit} on import.`,
+    );
+  }
+  return notes;
+}
+
+/** A document name reduced to something safe to hand a filesystem. */
+function stepFileNameFor(documentName: string): string {
+  const cleaned = documentName
+    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned === '' ? 'model' : cleaned;
 }

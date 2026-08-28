@@ -185,3 +185,58 @@ button:disabled { opacity: 0.4; cursor: default; }
   color: var(--muted);
   font-size: 12px;
 }
+
+/* The file input is replaced by its own label: a bare <input type="file"> cannot
+   be styled to match the buttons beside it, and hiding it behind a label is the
+   one approach that keeps the control keyboard-reachable and screen-reader
+   labelled rather than merely looking right. */
+#step-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.file-button {
+  background: #2d3238;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.file-button:hover { background: #363c43; border-color: #454b53; }
+
+/* The input is nested inside the label and visually hidden, so keyboard focus
+   lands on the input while the label is what the user sees. :focus-within is
+   what carries the focus ring across that split. */
+.file-button:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.file-button[aria-disabled='true'] { opacity: 0.4; cursor: default; }
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.check input { accent-color: var(--accent); }
+
+#step-notes {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#step-notes li {
+  padding: 3px 0;
+  border-top: 1px solid var(--line);
+}

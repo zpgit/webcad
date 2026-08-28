@@ -18,12 +18,17 @@ import {
 } from './errors.ts';
 import type {
   BodyRef,
+  BodySource,
   ConstructionEntry,
   ConstructionRecord,
   DocumentManifest,
   DocumentParts,
 } from './types.ts';
-import { PART_NAMES, SCHEMA_VERSION } from './types.ts';
+import {
+  MIN_READABLE_SCHEMA_VERSION,
+  PART_NAMES,
+  SCHEMA_VERSION,
+} from './types.ts';
 
 /**
  * What the document layer needs from the kernel.
@@ -47,6 +52,13 @@ export interface DocumentContent {
   /** Live bodies in the order they will be written to the checkpoint. */
   readonly bodies: readonly { readonly ref: BodyRef; readonly handle: BodyId }[];
   readonly entries: readonly ConstructionEntry[];
+  /**
+   * Where bodies came from, for the ones that came from somewhere.
+   *
+   * Absent entries mean `authored`, so a session that has imported nothing
+   * passes nothing here.
+   */
+  readonly sources?: ReadonlyMap<BodyRef, BodySource>;
   readonly nextBodyOrdinal: number;
 }
 
@@ -92,6 +104,16 @@ export async function buildParts(
     );
   }
 
+  // Only for bodies actually in the checkpoint: a source for a body that was
+  // released would persist provenance for geometry the document no longer holds.
+  const sources: Record<string, BodySource> = {};
+  for (const body of content.bodies) {
+    const source = content.sources?.get(body.ref);
+    if (source !== undefined && source.kind !== 'authored') {
+      sources[body.ref] = source;
+    }
+  }
+
   const manifest: DocumentManifest = {
     schemaVersion: SCHEMA_VERSION,
     documentId: content.documentId,
@@ -108,6 +130,10 @@ export async function buildParts(
       checksum: checksumOf(payload.bytes),
     },
     bodies: content.bodies.map((body) => body.ref),
+    // Written only for bodies that have something to say. A document of purely
+    // authored bodies carries no sources map at all, which keeps a version 2
+    // document byte-comparable with a version 1 one apart from the version.
+    ...(Object.keys(sources).length === 0 ? {} : { sources }),
     nextBodyOrdinal: content.nextBodyOrdinal,
   };
 
@@ -232,7 +258,15 @@ function parseManifest(part: Uint8Array): DocumentManifest {
   if (typeof schemaVersion !== 'number') {
     throw new DamagedDocumentError('manifest.json', 'declares no schema version');
   }
-  if (schemaVersion !== SCHEMA_VERSION) {
+  // A future version is refused; an older one within the readable range is not.
+  // Version 2's additions - body provenance and the import entry - are purely
+  // additive, and their absence in a version 1 document is not a gap to be
+  // filled but a fact: nothing in it was imported. Refusing it would cost a user
+  // their geometry over a field they never needed.
+  if (
+    schemaVersion > SCHEMA_VERSION ||
+    schemaVersion < MIN_READABLE_SCHEMA_VERSION
+  ) {
     throw new UnsupportedSchemaVersionError(schemaVersion, SCHEMA_VERSION);
   }
 
@@ -246,6 +280,8 @@ function parseManifest(part: Uint8Array): DocumentManifest {
   if (!Array.isArray(bodies) || bodies.some((ref) => typeof ref !== 'string')) {
     throw new DamagedDocumentError('manifest.json', 'has no readable body list');
   }
+
+  const sources = readSources(raw['sources']);
 
   return {
     schemaVersion,
@@ -263,8 +299,36 @@ function parseManifest(part: Uint8Array): DocumentManifest {
       checksum: requireString(geometry, 'checksum'),
     },
     bodies: bodies as readonly BodyRef[],
+    ...(sources === undefined ? {} : { sources }),
     nextBodyOrdinal: requireNumber(raw, 'nextBodyOrdinal'),
   };
+}
+
+/**
+ * Reads the body-provenance map, if there is one.
+ *
+ * Absent is normal, not damaged: a version 1 document has no such field, and a
+ * version 2 document that imported nothing does not write one. An entry that is
+ * present but unreadable is dropped rather than refused - provenance is
+ * metadata, and the rule this layer already applies to the construction record
+ * applies here too. What it must never do is invent provenance, so a dropped
+ * entry reads as `authored`, which is the same thing its absence means.
+ */
+function readSources(
+  raw: unknown,
+): Readonly<Record<string, BodySource>> | undefined {
+  if (!isRecord(raw)) return undefined;
+
+  const sources: Record<string, BodySource> = {};
+  for (const [ref, value] of Object.entries(raw)) {
+    if (!isRecord(value)) continue;
+    if (value['kind'] !== 'imported' || value['format'] !== 'step') continue;
+    const fileName = value['fileName'];
+    const declaredUnit = value['declaredUnit'];
+    if (typeof fileName !== 'string' || typeof declaredUnit !== 'string') continue;
+    sources[ref] = { kind: 'imported', format: 'step', fileName, declaredUnit };
+  }
+  return Object.keys(sources).length === 0 ? undefined : sources;
 }
 
 /**

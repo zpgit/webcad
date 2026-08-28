@@ -315,6 +315,7 @@ try {
       const list = document.getElementById('measurements');
       return (list?.textContent ?? '').match(/\d+\.\d+\.\d+/) !== null;
     },
+    undefined,
     { timeout: 60_000 },
   );
 
@@ -336,6 +337,7 @@ try {
       const match = text.match(/Live bodies(\d+)/);
       return match !== null && Number(match[1]) >= 2;
     },
+    undefined,
     { timeout: 60_000 },
   );
 
@@ -463,6 +465,7 @@ try {
       const match = text.match(/Live bodies(\d+)/);
       return match !== null && Number(match[1]) === 1;
     },
+    undefined,
     { timeout: 60_000 },
   );
 
@@ -836,6 +839,155 @@ try {
     }
   }
 
+  // What a STEP round trip costs and loses.
+  //
+  // MVP-2's question, and like the persistence measurement it lives next to the
+  // code under measurement (`tests/browser/step-measurements.ts`) so it runs
+  // against the real kernel through the real Worker. This is the harness: it
+  // drives that module, turns what it returns into findings, and decides what
+  // counts as a failure.
+  //
+  // The fixtures are OCCT's own test data under a gitignored path. When they are
+  // missing this reports that it could not run rather than reporting success -
+  // a measurement that never happened must not read like one that passed.
+  console.log('Measuring the STEP round trip...');
+  const step = await page.evaluate(async () => {
+    const { measureStepRoundTrip } = await import(
+      '/tests/browser/step-measurements.ts'
+    );
+    return measureStepRoundTrip(window.__webcad.kernel);
+  });
+
+  for (const missing of step.unavailableFixtures) {
+    note(`STEP fixture not exercised: ${missing.fixture} - ${missing.reason}`);
+  }
+  for (const message of step.notes) note(`STEP: ${message}`);
+
+  const phaseOf = (fixture, name) =>
+    fixture.timings.find((timing) => timing.phase === name);
+
+  for (const fixture of step.fixtures) {
+    const importPhase = phaseOf(fixture, 'import');
+    const exportPhase = phaseOf(fixture, 'export');
+    const tessellate = phaseOf(fixture, 'tessellate');
+
+    note(
+      `${fixture.fixture}: ${kb(fixture.fileBytes)} in, ` +
+        `${fixture.imported.bodyCount} ${fixture.imported.bodyCount === 1 ? 'body' : 'bodies'}, ` +
+        `${fixture.imported.faceCount} faces — ` +
+        `import ${importPhase ? importPhase.ms.toFixed(1) : '?'} ms, ` +
+        `tessellate ${tessellate ? tessellate.ms.toFixed(1) : '?'} ms, ` +
+        `export ${exportPhase ? exportPhase.ms.toFixed(1) : '?'} ms ` +
+        `(${kb(fixture.exportBytes)} out), ` +
+        `checkpoint ${kb(fixture.checkpointBytes)}`,
+    );
+    note(
+      `${fixture.fixture}: declared unit ` +
+        `${fixture.importReport.unitWasAssumed ? 'none' : fixture.importReport.declaredUnit}` +
+        ` -> ${fixture.importReport.workingUnit}; ` +
+        `${fixture.importReport.rootShapeCount} roots, ` +
+        `${fixture.importReport.unregisteredShapeCount} unusable, ` +
+        `${fixture.importReport.openBodyCount} not closed solids; ` +
+        `dropped ${fixture.importReport.namedProductCount} named products, ` +
+        `${fixture.importReport.styledItemCount} styles, ` +
+        `${fixture.importReport.assemblyNodeCount} assembly nodes`,
+    );
+
+    // The healer's contribution, stated as a delta rather than folded into the
+    // translation numbers. This is the figure that decides the shipped default.
+    if (fixture.healedReport === null) {
+      note(`${fixture.fixture}: shape processing could not be measured`);
+    } else if (fixture.healingDeltas.length === 0) {
+      note(
+        `${fixture.fixture}: OCCT shape processing (${fixture.healedReport.shapeProcessing}) ` +
+          'changed nothing measurable',
+      );
+    } else {
+      note(
+        `${fixture.fixture}: OCCT shape processing changed ` +
+          fixture.healingDeltas
+            .map((delta) => `${delta.field} ${delta.before} -> ${delta.after}`)
+            .join(', '),
+      );
+    }
+
+    // A native checkpoint is known to be lossless (MVP-1), so it acts as a
+    // control on the comparison method itself. If this leg reports a delta, the
+    // census is wrong before any conclusion about STEP can be drawn.
+    if (fixture.checkpointDeltas.length > 0) {
+      throw new Error(
+        `${fixture.fixture}: a native checkpoint round trip changed ` +
+          fixture.checkpointDeltas
+            .map((delta) => `${delta.field} ${delta.before} -> ${delta.after}`)
+            .join(', ') +
+          ' - the comparison method is suspect, not the translator',
+      );
+    }
+
+    if (fixture.reimportDeltas.length === 0) {
+      note(`${fixture.fixture}: STEP round trip preserved the full census`);
+    } else {
+      note(
+        `finding: ${fixture.fixture} STEP round trip changed ` +
+          fixture.reimportDeltas
+            .map(
+              (delta) =>
+                `${delta.field} ${delta.before} -> ${delta.after}` +
+                (delta.relative === undefined
+                  ? ''
+                  : ` (${(delta.relative * 100).toFixed(4)}%)`),
+            )
+            .join(', '),
+      );
+    }
+  }
+
+  // The edit leg, on geometry authored here so it always runs and its expected
+  // volume is arithmetic rather than whatever a fixture happened to hold.
+  if (step.edit === null) {
+    throw new Error('the STEP edit round trip did not run');
+  }
+  const edit = step.edit;
+  note(
+    `edit round trip: ${edit.label}, removed ` +
+      `${edit.volumeRemoved.toFixed(1)} mm³, exported ${kb(edit.exportBytes)}, ` +
+      `re-imported with ${edit.deltas.length} differences`,
+  );
+
+  // Section 5 of the architecture note in one assertion: an edit made in the
+  // browser has to be in the exported file. A writer that exported the
+  // pre-Boolean geometry would pass every other check here.
+  if (edit.afterReimport.volume >= edit.beforeEdit.volume) {
+    throw new Error(
+      'the exported STEP did not contain the edit: re-imported volume ' +
+        `${edit.afterReimport.volume.toFixed(1)} is not less than the ` +
+        `pre-edit ${edit.beforeEdit.volume.toFixed(1)}`,
+    );
+  }
+  const volumeDrift = Math.abs(
+    (edit.afterReimport.volume - edit.afterEdit.volume) / edit.afterEdit.volume,
+  );
+  if (volumeDrift > 1e-6) {
+    throw new Error(
+      `a STEP round trip changed the edited volume by ${(volumeDrift * 100).toFixed(4)}%`,
+    );
+  }
+  // The cylindrical face the drill introduced must still be an exact cylinder.
+  // A faceted or spline-approximated export is the failure mode that looks like
+  // success everywhere else.
+  const cylindersBefore = edit.afterEdit.surfaces.cylinder ?? 0;
+  const cylindersAfter = edit.afterReimport.surfaces.cylinder ?? 0;
+  if (cylindersBefore === 0 || cylindersAfter !== cylindersBefore) {
+    throw new Error(
+      `a STEP round trip did not preserve analytic cylinders: ` +
+        `${cylindersBefore} -> ${cylindersAfter}`,
+    );
+  }
+
+  note(
+    `peak WASM memory after translation: ${kb(step.peakWasmMemoryBytes)}`,
+  );
+
   // Save, reload, and see the model come back.
   //
   // This is MVP-1's actual question, and it can only be asked of a real browser
@@ -874,12 +1026,14 @@ try {
   await page.reload({ waitUntil: 'load' });
   await page.waitForFunction(
     () => window.__webcad?.kernel?.isReady === true,
+    undefined,
     { timeout: 60_000 },
   );
   // Restoration is awaited during startup, so by the time the handle exists the
   // document is either open or the failure has been reported on the page.
   await page.waitForFunction(
     () => (window.__webcad?.session?.document?.bodies.length ?? 0) > 0,
+    undefined,
     { timeout: 60_000 },
   );
 
@@ -1144,6 +1298,23 @@ try {
       null,
       2,
     )}\n`,
+  );
+
+  // The STEP round trip in its own file, for the same reason the Worker numbers
+  // are: it answers a different question, and the censuses are too bulky to read
+  // next to the storage comparison. It carries the fixture sizes and the deltas
+  // so a findings document can quote them without re-running the browser.
+  const stepPath = forceWebgl
+    ? 'measurements/step-webgl2.json'
+    : 'measurements/step.json';
+  writeFileSync(
+    stepPath,
+    `${JSON.stringify(
+      { backend: initial['Backend'], occtVersion: initial['OCCT'], ...step },
+      null,
+      2,
+    )}
+`,
   );
 
   // One artifact for everything about the document layer, so IndexedDB and OPFS

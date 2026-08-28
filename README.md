@@ -18,14 +18,14 @@ operation's kernel time, what the Worker round trip added, and — for anything
 past a frame — how much **latency** the user saw. Latency, not dropped frames:
 the viewport keeps drawing throughout. [Higher-quality MP4](docs/demo.mp4).
 
-## Status: MVP-1 complete — Worker kernel, and models that survive a restart
+## Status: MVP-2 complete — STEP in, edit, STEP out
 
 MVP-0 measured the OCCT/WASM-to-rendering boundary that every later stage depends
 on, and found the main thread already blocked on trivial geometry. MVP-1 acted on
-that and then built the document layer on top of the measured boundary. Both
-halves are done: the kernel runs in a dedicated Worker, where a 160 ms Boolean
-stalls the main thread for 6.5 ms against a 5.5 ms idle baseline — and a model now
-survives closing the browser.
+that and then built the document layer on top of the measured boundary: the kernel
+runs in a dedicated Worker, where a 160 ms Boolean stalls the main thread for
+6.5 ms against a 5.5 ms idle baseline, and a model survives closing the browser.
+MVP-2 opened the system to geometry it did not author.
 
 You can create boxes and cylinders, union / subtract / intersect them, orbit the
 result, and **save it**. Saving writes a native document — a versioned container
@@ -35,9 +35,26 @@ geometry, not a mesh: a reloaded page comes back with the same bodies under the
 same document identities, re-tessellated from the exact surfaces. The document you
 had open reopens by itself on load.
 
-There is no feature history you can edit and no file import. The construction
-record is written and displayed but never replayed; STEP arrives in MVP-2.
+You can also **import a STEP file, edit it, and export STEP again**. An imported
+body is an ordinary body: it takes part in Booleans, goes into the checkpoint, and
+exports with the edit in it. It arrives as a base feature with its source file
+recorded as provenance — no parametric history is invented for it — and what STEP
+carries beyond shape is counted and reported as dropped rather than silently lost.
 
+There is still no feature history you can edit. The construction record is
+written and displayed but never replayed. Assembly structure, part names and
+colours are not preserved; that needs XCAF and is MVP-3's.
+
+- [`docs/MVP-2-FINDINGS.md`](docs/MVP-2-FINDINGS.md) — what the STEP round trip
+  costs and loses. Both fixtures survive import, checkpoint, edit and export with
+  topology, volume and area intact, and one comes back with three toroidal faces
+  re-typed as surfaces of revolution — exact geometry, different analytic
+  identity. STEP import runs at 2.7–4.4 kB/ms against the native checkpoint's
+  49–199 kB/ms, which is the measured argument for the document not being STEP;
+  the first translation in a session costs 220 ms of pure warmup; and the `.wasm`
+  grew 45% compressed to carry the translator. Linking STEP also exposed an
+  emscripten miscompilation that had been dead-stripped out of every previous
+  build.
 - [`docs/MVP-1-FINDINGS.md`](docs/MVP-1-FINDINGS.md) — what persistence costs.
   Exact B-Rep serializes at 70–112 kB/ms and restores at 46–77 kB/ms; a checkpoint
   is ~860 bytes per face; IndexedDB beat OPFS on every operation by 1.8–45× and is
@@ -161,22 +178,22 @@ in the build, where the dev-only verification handle does not exist.
 
 | Path | |
 | --- | --- |
-| `native/src/` | the C++ facade over OCCT — the only code that touches B-Rep |
+| `native/src/` | the C++ facade over OCCT — the only code that touches B-Rep, or reads a `.step` |
 | `src/kernel/` | TypeScript kernel API: handles, typed errors, instrumentation |
 | `src/kernel/worker/` | the Worker the kernel runs in, and the protocol reaching it |
 | `src/viewport/` | three.js scene, WebGPU/WebGL2 selection, picking |
-| `src/document/` | the document container: parts, manifest, identity, integrity |
+| `src/document/` | the document container: parts, manifest, identity, provenance |
 | `src/storage/` | where documents live — IndexedDB and OPFS behind one interface |
 | `src/app/` | modeling session tying the kernel, the viewport, and the document |
 | `tests/browser/` | suites that need a real browser: storage conformance, measurements |
 | `openspec/specs/` | what the system is specified to do, by capability |
 | `docs/` | build guide and stage findings |
 
-Requirements live in `openspec/specs/` as nine capabilities — `geometry-kernel`,
+Requirements live in `openspec/specs/` as eleven capabilities — `geometry-kernel`,
 `kernel-worker`, `solid-primitives`, `boolean-operations`, `tessellation`,
-`viewport`, `brep-serialization`, `native-document`, and `document-storage`. Each
-opens with the constraint it exists to hold, which is usually more useful than
-the requirements underneath it.
+`viewport`, `brep-serialization`, `native-document`, `document-storage`,
+`step-translation`, and `file-exchange`. Each opens with the constraint it exists
+to hold, which is usually more useful than the requirements underneath it.
 
 ## Roadmap
 
@@ -187,7 +204,7 @@ Each stage exists to validate one bottleneck rather than to add features.
 | **MVP-0** | Primitives, Booleans, viewport | ✅ OCCT/WASM-to-render boundary |
 | **MVP-1a** | Kernel in a Worker | ✅ cost of the thread boundary |
 | **MVP-1b** | Native document + `.brep` checkpoint | ✅ restart recovery cost |
-| MVP-2 | STEP import, edit, export | round-trip fidelity |
+| **MVP-2** | STEP import, edit, export | ✅ round-trip fidelity |
 | MVP-3 | Assembly, naming, colour via XCAF | STEP document semantics |
 | MVP-4 | Persistent references, incremental recompute | edit stability |
 

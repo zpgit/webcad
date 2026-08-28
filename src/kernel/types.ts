@@ -96,6 +96,69 @@ export interface FaceTypeSummary {
   readonly other: number;
 }
 
+/**
+ * How a STEP translation should treat OCCT's shape-processing pass.
+ *
+ * OCCT does not translate STEP untouched: its reader runs `FixShape` and its
+ * writer runs `SplitCommonVertex` and `DirectFaces` by default, and both change
+ * the topology that crosses the boundary. This is off by default here, against
+ * the library's own default, because a repair pass is indistinguishable in the
+ * result from a translation loss - and separating the two is the whole point of
+ * measuring a round trip.
+ */
+export interface StepTranslationOptions {
+  readonly shapeProcessing?: boolean;
+}
+
+/**
+ * What an import produced, and what it could not bring with it.
+ *
+ * Counts and names only. No STEP entity, product node, or attribute record
+ * crosses into JavaScript - a caller learns about imported geometry the same
+ * way it learns about geometry it created, through handles and scalars.
+ */
+export interface StepImportReport {
+  readonly bodyIds: readonly BodyId[];
+  /** Roots the reader offered against shapes that could not become bodies. */
+  readonly rootShapeCount: number;
+  readonly unregisteredShapeCount: number;
+  /**
+   * Bodies that are not valid closed solids - open shells and shapes that fail
+   * OCCT's validity check, both of which real STEP data contains. They are
+   * ordinary bodies; an operation needing a solid fails on its own terms. Named
+   * here so a caller knows before it tries.
+   */
+  readonly openBodyIds: readonly BodyId[];
+  /**
+   * The unit the file declared, and the unit the bodies are expressed in. The
+   * conversion between them happened during translation, once, at the boundary;
+   * nothing downstream converts again. `unitWasAssumed` means the file declared
+   * nothing determinable and `workingUnit` was assumed in its place.
+   */
+  readonly declaredUnit: string;
+  readonly workingUnit: string;
+  readonly unitWasAssumed: boolean;
+  /**
+   * STEP semantics this stage does not preserve, counted so the loss is stated
+   * rather than discovered. Preserving them needs XCAF and is MVP-3's.
+   */
+  readonly namedProductCount: number;
+  readonly styledItemCount: number;
+  readonly assemblyNodeCount: number;
+  /** Shape-processing operations that ran, empty when none did. */
+  readonly shapeProcessing: string;
+  readonly payloadByteLength: number;
+}
+
+/** What an export wrote. The bytes themselves are the caller's to own. */
+export interface StepExportReport {
+  readonly bytes: Uint8Array;
+  readonly bodyCount: number;
+  /** The unit the payload declares, reported rather than left implicit. */
+  readonly unitWritten: string;
+  readonly shapeProcessing: string;
+}
+
 /** Metadata about a tessellation; safe to retain. */
 export interface MeshMeta {
   readonly vertexCount: number;

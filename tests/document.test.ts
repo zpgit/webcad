@@ -20,7 +20,7 @@ import {
   UnsupportedSchemaVersionError,
 } from '../src/document/errors.ts';
 import type { DocumentManifest, DocumentParts, PartName } from '../src/document/types.ts';
-import { SCHEMA_VERSION } from '../src/document/types.ts';
+import { asBodyRef, SCHEMA_VERSION } from '../src/document/types.ts';
 import type { BodyId } from '../src/kernel/types.ts';
 import { asBodyId } from '../src/kernel/types.ts';
 import { boxAndDrill, closeTo, kernelSkip, makeKernel } from './helpers/kernel.ts';
@@ -515,4 +515,176 @@ test('reading a document detaches its geometry part', { skip }, async () => {
 
   await readDocument(parts, kernel);
   assert.equal(parts['geometry.brep'].byteLength, 0);
+});
+
+// --- Provenance ---------------------------------------------------------------
+//
+// MVP-2 gave bodies a source and the record an import entry. Both are metadata,
+// which is precisely why they need testing: nothing downstream reads them, so a
+// silent failure to persist them would go unnoticed until someone asked a
+// document where its geometry came from and it had forgotten.
+
+test('an imported body keeps its provenance across a round trip', async () => {
+  const kernel = new FakeKernel();
+  const draft = DocumentDraft.create('Imported', {
+    documentId: 'doc-import',
+    createdAt: FIXED_CLOCK(),
+  });
+  const refs = draft.recordImport([asBodyId(11), asBodyId(12)], {
+    fileName: 'bracket.step',
+    declaredUnit: 'in',
+  });
+  assert.equal(refs.length, 2);
+
+  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
+  const manifest = manifestOf(parts);
+
+  // The document's own unit is untouched by an import declaring another one:
+  // conversion happened at the translation boundary, so by the time geometry
+  // reaches the document there is one unit and this is it.
+  assert.equal(manifest.units, 'mm');
+
+  const source = manifest.sources?.['b1'];
+  assert.ok(source !== undefined, 'a source was written');
+  assert.equal(source.kind, 'imported');
+  if (source.kind !== 'imported') throw new Error('unreachable');
+  assert.equal(source.fileName, 'bracket.step');
+  assert.equal(source.declaredUnit, 'in', 'the file\'s own unit is kept as provenance');
+
+  const opened = await readDocument(parts, kernel);
+  const reopened = DocumentDraft.fromOpened(opened);
+  assert.deepEqual(reopened.sourceOf(refs[0]!), {
+    kind: 'imported',
+    format: 'step',
+    fileName: 'bracket.step',
+    declaredUnit: 'in',
+  });
+});
+
+test('an import entry round trips, naming every body it produced', async () => {
+  const kernel = new FakeKernel();
+  const draft = DocumentDraft.create('Edited import', {
+    documentId: 'doc-edit',
+    createdAt: FIXED_CLOCK(),
+  });
+  const imported = draft.recordImport([asBodyId(21), asBodyId(22)], {
+    fileName: 'rods.step',
+    declaredUnit: 'mm',
+  });
+  const tool = draft.recordCylinder(asBodyId(23), { radius: 4, height: 20 });
+  draft.recordBoolean('subtract', imported[0]!, tool, asBodyId(24));
+
+  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
+  const opened = await readDocument(parts, kernel);
+  assert.ok(opened.record !== null);
+
+  const entries = opened.record.entries;
+  const importEntry = entries[0];
+  assert.ok(importEntry !== undefined);
+  assert.equal(importEntry.op, 'importStep');
+  if (importEntry.op !== 'importStep') throw new Error('unreachable');
+  assert.equal(importEntry.fileName, 'rods.step');
+  assert.deepEqual([...importEntry.produces], ['b1', 'b2']);
+
+  // The import is a base feature and the Boolean sits on top of it, in order.
+  assert.deepEqual(
+    entries.map((entry) => entry.op),
+    ['importStep', 'createCylinder', 'boolean'],
+  );
+});
+
+test('an authored-only document writes no sources at all', async () => {
+  const kernel = new FakeKernel();
+  const parts = await buildParts(kernel, draftWithHistory().content(), {
+    now: FIXED_CLOCK,
+  });
+
+  // Absence is the representation of "authored here". Writing an explicit
+  // `authored` entry per body would bloat every document to say nothing.
+  assert.equal(manifestOf(parts).sources, undefined);
+});
+
+test('provenance for a released body is not persisted', async () => {
+  const kernel = new FakeKernel();
+  const draft = DocumentDraft.create('Dropped', { documentId: 'doc-drop' });
+  const refs = draft.recordImport([asBodyId(31)], {
+    fileName: 'gone.step',
+    declaredUnit: 'mm',
+  });
+  draft.recordRelease(refs[0]!);
+
+  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
+  assert.equal(
+    manifestOf(parts).sources,
+    undefined,
+    'a document must not claim provenance for geometry it no longer holds',
+  );
+});
+
+/**
+ * A document written before provenance existed must still open.
+ *
+ * The schema bump is additive, so the previous version is still readable. This
+ * is the test that keeps that promise honest: a user's MVP-1 documents are on
+ * their disk, and a version check that refused them would be a data-loss bug
+ * dressed up as caution.
+ */
+test('a version 1 document opens, its bodies reading as authored', async () => {
+  const kernel = new FakeKernel();
+  const parts = await buildParts(kernel, draftWithHistory().content(), {
+    now: FIXED_CLOCK,
+  });
+
+  const legacy = withManifest(parts, (manifest) => {
+    manifest['schemaVersion'] = 1;
+    delete manifest['sources'];
+  });
+
+  const opened = await readDocument(legacy, kernel);
+  assert.equal(opened.manifest.schemaVersion, 1);
+
+  const draft = DocumentDraft.fromOpened(opened);
+  for (const body of draft.bodies) {
+    assert.deepEqual(
+      draft.sourceOf(body.ref),
+      { kind: 'authored' },
+      'no recorded source means authored here, not unknown',
+    );
+  }
+});
+
+test('a document from the future is still refused', async () => {
+  const kernel = new FakeKernel();
+  const parts = await buildParts(kernel, draftWithHistory().content(), {
+    now: FIXED_CLOCK,
+  });
+  const future = withManifest(parts, (manifest) => {
+    manifest['schemaVersion'] = SCHEMA_VERSION + 1;
+  });
+
+  await assert.rejects(
+    () => readDocument(future, kernel),
+    UnsupportedSchemaVersionError,
+  );
+});
+
+test('an unreadable source entry reads as authored rather than failing', async () => {
+  const kernel = new FakeKernel();
+  const draft = DocumentDraft.create('Half-written', { documentId: 'doc-junk' });
+  draft.recordImport([asBodyId(41)], { fileName: 'x.step', declaredUnit: 'mm' });
+
+  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
+  const damaged = withManifest(parts, (manifest) => {
+    manifest['sources'] = { b1: { kind: 'imported', format: 'step' } };
+  });
+
+  // Provenance is metadata: the rule this layer already applies to the
+  // construction record applies here. A malformed entry is dropped, and what it
+  // must never do is turn into invented provenance or a refused document.
+  const opened = await readDocument(damaged, kernel);
+  assert.equal(opened.manifest.sources, undefined);
+  assert.deepEqual(
+    DocumentDraft.fromOpened(opened).sourceOf(asBodyRef('b1')),
+    { kind: 'authored' },
+  );
 });

@@ -25,9 +25,25 @@
 #include <BinTools_FormatVersion.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <Interface_InterfaceModel.hxx>
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_Printer.hxx>
+#include <NCollection_Sequence.hxx>
 #include <Poly_Triangulation.hxx>
+#include <STEPControl_Reader.hxx>
+#include <STEPControl_StepModelType.hxx>
+#include <STEPControl_Writer.hxx>
+#include <ShapeProcess.hxx>
 #include <Standard_Failure.hxx>
+#include <Standard_Type.hxx>
 #include <Standard_Version.hxx>
+#include <StepBasic_Product.hxx>
+#include <StepData_StepModel.hxx>
+#include <StepRepr_NextAssemblyUsageOccurrence.hxx>
+#include <StepVisual_StyledItem.hxx>
+#include <TCollection_AsciiString.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
@@ -158,6 +174,102 @@ OpResult registerSolid(const TopoDS_Shape& shape, const char* what) {
 // Validates a rotation/extrusion axis is not degenerate.
 bool axisIsUsable(double x, double y, double z) {
   return std::sqrt(x * x + y * y + z * z) > 1e-12;
+}
+
+// --- STEP translation helpers ----------------------------------------------
+
+// Registers a shape that came from outside this system.
+//
+// Deliberately weaker than registerSolid, which stays the strict gate for
+// primitives and Boolean results: those are geometry this kernel just built, and
+// a malformed one is a bug worth refusing. An imported shape is different -
+// real STEP data contains open shells and solids that fail BRepCheck, and
+// refusing them would reject usable files wholesale and report nothing about
+// them. So the shape is registered and its validity is reported honestly,
+// leaving an operation that needs a solid to fail on its own terms.
+//
+// The one thing still refused is a shape with no face at all: a stray curve or
+// point carries nothing this system can treat as a body, and counting it as
+// unregistered says more than issuing a handle to it would.
+bool importedShapeIsUsable(const TopoDS_Shape& shape) {
+  if (shape.IsNull()) return false;
+  return countSubShapes(shape, TopAbs_FACE) > 0;
+}
+
+// Flattens compounds down to their non-compound leaves.
+//
+// A STEP assembly transfers as nested compounds. This stage has nowhere to put
+// an assembly hierarchy - that needs XCAF and is MVP-3's - so the parts arrive
+// as a flat set of bodies rather than one body that is secretly a tree. The
+// recursion is what makes "flattened" true for a nested assembly and not just
+// for a single level of it.
+void collectLeafShapes(const TopoDS_Shape& shape,
+                       std::vector<TopoDS_Shape>& out) {
+  if (shape.IsNull()) return;
+  if (shape.ShapeType() != TopAbs_COMPOUND) {
+    out.push_back(shape);
+    return;
+  }
+  for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+    collectLeafShapes(it.Value(), out);
+  }
+}
+
+// Names a length unit from its millimetre factor, for reporting.
+//
+// OCCT carries units as a factor rather than a name once a model is loaded, and
+// a factor in a report is harder to read than a name. Anything unrecognized is
+// reported as its factor rather than forced into the nearest name.
+std::string lengthUnitName(double millimetresPerUnit) {
+  struct Known {
+    double factor;
+    const char* name;
+  };
+  static const Known kKnown[] = {
+      {1.0, "mm"}, {10.0, "cm"}, {1000.0, "m"},
+      {25.4, "in"}, {304.8, "ft"}, {0.001, "um"},
+  };
+  for (const Known& k : kKnown) {
+    if (std::fabs(millimetresPerUnit - k.factor) < 1e-9 * k.factor) {
+      return k.name;
+    }
+  }
+  std::ostringstream os;
+  os << millimetresPerUnit << "mm";
+  return os.str();
+}
+
+// What OCCT's shape processing does when it is left enabled.
+//
+// Hardcoded rather than queried: the accessors that would enumerate the flags
+// at run time (GetDefaultShapeProcessFlags) are protected, so the facade cannot
+// read them. These are OCCT 8.0.1's defaults, verified in its source -
+// STEPControl_Reader.cxx:864-867 for the reader, STEPControl_Controller.cxx:
+// 348-353 for the writer. If a later OCCT changes them this string goes stale,
+// which is why it names its source.
+constexpr const char* kReaderDefaultProcessing = "FixShape";
+constexpr const char* kWriterDefaultProcessing = "SplitCommonVertex,DirectFaces";
+
+// Stops OCCT's translators narrating to the console.
+//
+// The STEP reader and writer send per-transfer statistics through OCCT's default
+// messenger at Info gravity, unconditionally - banner lines, transfer modes, one
+// block per shape. In a browser that is console noise from a library the
+// application is meant to be hiding, and in a test run it buries the output.
+//
+// Info is dropped and Warning upwards is kept: a translator that has something
+// real to report must still be able to say so. Applied once, lazily, because
+// there is no facade initialization hook and the messenger is global.
+void quietOcctChatter() {
+  static bool done = false;
+  if (done) return;
+  done = true;
+
+  const occ::handle<Message_Messenger>& messenger = Message::DefaultMessenger();
+  if (messenger.IsNull()) return;
+  for (const occ::handle<Message_Printer>& printer : messenger->Printers()) {
+    if (!printer.IsNull()) printer->SetTraceLevel(Message_Warning);
+  }
 }
 
 }  // namespace
@@ -660,6 +772,237 @@ RestoreResult restoreBodies() {
     }
 
     out.firstBodyId = issued[0];
+    return out;
+  });
+}
+
+StepImportResult importStep(const StepTranslationOptions& options) {
+  if (g_staging.empty()) {
+    return fail<StepImportResult>(Status::InvalidParameter,
+                                  "no payload has been staged");
+  }
+
+  quietOcctChatter();
+
+  return guarded<StepImportResult>([&] {
+    StepImportResult out;
+    out.payloadByteLength = static_cast<uint32_t>(g_staging.size());
+
+    STEPControl_Reader reader;
+    if (!options.shapeProcessing) {
+      // An empty flag set is what disables the pass; OCCT's own default enables
+      // FixShape. Suppressed by default here so a difference between the file
+      // and the body is attributable to translation rather than to repair.
+      reader.SetShapeProcessFlags(ShapeProcess::OperationsFlags{});
+    } else {
+      out.shapeProcessing = kReaderDefaultProcessing;
+    }
+
+    // The bytes are read from a stream over the staging buffer rather than
+    // through a virtual filesystem: no MEMFS, no second copy of the payload at
+    // exactly the size where memory is the constraint, and no path namespace to
+    // clean up on failure.
+    std::istringstream stream(g_staging, std::ios::in | std::ios::binary);
+    const IFSelect_ReturnStatus readStatus = reader.ReadStream("staged", stream);
+    if (readStatus != IFSelect_RetDone) {
+      // Covers bytes that are not STEP and a payload cut short partway: OCCT
+      // reports both as a failed load, and neither may register the entities it
+      // managed to parse, or a partial import could be mistaken for a whole one.
+      return fail<StepImportResult>(
+          Status::TranslationFailed,
+          "payload could not be read as STEP (status " +
+              std::to_string(static_cast<int>(readStatus)) + ")");
+    }
+
+    // Units, read before the transfer that converts them. FileUnits reports the
+    // unit names the file declared per shape representation; the transfer then
+    // expresses the result in the system unit. Both are reported, and the
+    // conversion between them happens here and nowhere else downstream.
+    NCollection_Sequence<TCollection_AsciiString> unitLengths;
+    NCollection_Sequence<TCollection_AsciiString> unitAngles;
+    NCollection_Sequence<TCollection_AsciiString> unitSolidAngles;
+    reader.FileUnits(unitLengths, unitAngles, unitSolidAngles);
+    for (int i = 1; i <= unitLengths.Length(); ++i) {
+      const std::string name(unitLengths.Value(i).ToCString());
+      if (name.empty()) continue;
+      if (out.declaredUnit.empty()) {
+        out.declaredUnit = name;
+      } else if (out.declaredUnit.find(name) == std::string::npos) {
+        // A file whose representations disagree about units is a real thing.
+        // Reported rather than resolved to the first one seen.
+        out.declaredUnit += "," + name;
+      }
+    }
+    out.workingUnit = lengthUnitName(reader.SystemLengthUnit());
+    out.unitWasAssumed = out.declaredUnit.empty();
+
+    // What the file carries beyond shape, counted before the transfer discards
+    // it. These are counts of entity kinds - no entity crosses the boundary -
+    // and they exist so the loss is stated rather than discovered.
+    const Handle(Interface_InterfaceModel) model = reader.Model();
+    if (!model.IsNull()) {
+      for (int i = 1; i <= model->NbEntities(); ++i) {
+        const Handle(Standard_Transient) entity = model->Value(i);
+        if (entity.IsNull()) continue;
+        if (entity->IsKind(STANDARD_TYPE(StepVisual_StyledItem))) {
+          ++out.styledItemCount;
+        }
+        if (entity->IsKind(STANDARD_TYPE(StepRepr_NextAssemblyUsageOccurrence))) {
+          ++out.assemblyNodeCount;
+        }
+        if (entity->IsKind(STANDARD_TYPE(StepBasic_Product))) {
+          ++out.namedProductCount;
+        }
+      }
+    }
+
+    out.rootShapeCount = static_cast<uint32_t>(reader.NbRootsForTransfer());
+    reader.TransferRoots();
+
+    // Every transferred shape, flattened through compounds, gathered and
+    // checked before anything is registered - so the all-or-nothing guarantee
+    // does not depend on unwinding a partial registration.
+    std::vector<TopoDS_Shape> leaves;
+    for (int i = 1; i <= reader.NbShapes(); ++i) {
+      collectLeafShapes(reader.Shape(i), leaves);
+    }
+
+    std::vector<TopoDS_Shape> usable;
+    usable.reserve(leaves.size());
+    for (const TopoDS_Shape& leaf : leaves) {
+      if (importedShapeIsUsable(leaf)) {
+        usable.push_back(leaf);
+      } else {
+        ++out.unregisteredShapeCount;
+      }
+    }
+
+    if (usable.empty()) {
+      // A syntactically valid file that yielded nothing this system can hold.
+      // Reported as an empty result, distinct from the parse failure above,
+      // because the two mean different things to a caller.
+      //
+      // Set on `out` rather than returned through fail<>, which would hand back
+      // a fresh struct and throw away the unit and dropped-semantics fields
+      // already gathered. Those are exactly what makes this outcome diagnosable
+      // - how many roots the file offered, and how many were skipped - so
+      // losing them here would make the report useless in the one case a caller
+      // most needs to understand.
+      out.status = static_cast<int32_t>(Status::EmptyResult);
+      out.message = "STEP payload contained no transferable shape";
+      return out;
+    }
+
+    std::vector<uint32_t> issued;
+    issued.reserve(usable.size());
+    try {
+      for (const TopoDS_Shape& shape : usable) {
+        issued.push_back(registry().add(shape));
+      }
+    } catch (...) {
+      for (const uint32_t id : issued) registry().release(id);
+      throw;
+    }
+
+    // As in restoreBodies: consecutive issuance is what lets a caller address
+    // the i-th body as firstBodyId + i, and it is verified rather than trusted.
+    for (size_t i = 0; i < issued.size(); ++i) {
+      if (issued[i] != issued[0] + static_cast<uint32_t>(i)) {
+        for (const uint32_t id : issued) registry().release(id);
+        return fail<StepImportResult>(Status::KernelOperationFailed,
+                                      "registry issued non-consecutive handles");
+      }
+    }
+
+    // Validity is reported, not enforced. BRepCheck_Analyzer runs here - unlike
+    // in restoreBodies, where the geometry had already been validated on the way
+    // in - because for imported geometry its answer is the finding.
+    for (size_t i = 0; i < usable.size(); ++i) {
+      const TopoDS_Shape& shape = usable[i];
+      const bool closedSolid = countSubShapes(shape, TopAbs_SOLID) > 0 &&
+                               BRepCheck_Analyzer(shape).IsValid();
+      if (!closedSolid) out.openBodyIds.push_back(issued[i]);
+    }
+
+    out.firstBodyId = issued[0];
+    out.bodyCount = static_cast<uint32_t>(issued.size());
+    return out;
+  });
+}
+
+StepExportResult exportStep(const std::vector<uint32_t>& bodyIds,
+                            const StepTranslationOptions& options) {
+  if (bodyIds.empty()) {
+    // Writing an interchange file describing nothing is not a useful outcome to
+    // hand a caller, and the application refuses an empty export above this.
+    return fail<StepExportResult>(Status::InvalidParameter,
+                                  "no bodies to export");
+  }
+
+  // Resolved before a byte is written, as in serializeBodies: a set containing
+  // an unknown handle must fail having produced nothing.
+  std::vector<TopoDS_Shape> shapes;
+  shapes.reserve(bodyIds.size());
+  for (const uint32_t id : bodyIds) {
+    const TopoDS_Shape* found = registry().find(id);
+    if (found == nullptr) {
+      return fail<StepExportResult>(
+          Status::InvalidHandle,
+          "unknown or already-released body " + std::to_string(id));
+    }
+    shapes.push_back(*found);
+  }
+
+  quietOcctChatter();
+
+  return guarded<StepExportResult>([&] {
+    StepExportResult out;
+
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const TopoDS_Shape& shape : shapes) {
+      builder.Add(compound, shape);
+    }
+
+    STEPControl_Writer writer;
+    if (!options.shapeProcessing) {
+      writer.SetShapeProcessFlags(ShapeProcess::OperationsFlags{});
+    } else {
+      out.shapeProcessing = kWriterDefaultProcessing;
+    }
+
+    // AsIs writes each shape as the STEP entity that matches what it already is,
+    // rather than forcing everything to a faceted or shell-based form. Anything
+    // else would discard exact geometry on the way out, which is the one thing
+    // an export here must not do.
+    const IFSelect_ReturnStatus transferStatus =
+        writer.Transfer(compound, STEPControl_AsIs);
+    if (transferStatus != IFSelect_RetDone) {
+      return fail<StepExportResult>(
+          Status::TranslationFailed,
+          "bodies could not be transferred to STEP (status " +
+              std::to_string(static_cast<int>(transferStatus)) + ")");
+    }
+
+    std::ostringstream stream(std::ios::out | std::ios::binary);
+    const IFSelect_ReturnStatus writeStatus = writer.WriteStream(stream);
+    if (writeStatus != IFSelect_RetDone) {
+      return fail<StepExportResult>(
+          Status::TranslationFailed,
+          "STEP payload could not be written (status " +
+              std::to_string(static_cast<int>(writeStatus)) + ")");
+    }
+
+    g_staging = stream.str();
+
+    const Handle(StepData_StepModel) stepModel = writer.Model();
+    out.unitWritten = stepModel.IsNull()
+                          ? std::string()
+                          : lengthUnitName(stepModel->WriteLengthUnit());
+    out.dataPtr = reinterpret_cast<uint32_t>(g_staging.data());
+    out.byteLength = static_cast<uint32_t>(g_staging.size());
+    out.bodyCount = static_cast<uint32_t>(shapes.size());
     return out;
   });
 }
