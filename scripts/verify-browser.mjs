@@ -74,31 +74,46 @@ async function measureWorkerBoundary(page) {
     /**
      * How long the main thread goes unavailable while an operation runs.
      *
-     * A self-rescheduling timer, not requestAnimationFrame: headless Chrome
-     * composites lazily and fires almost no frames, so a rAF probe reports
-     * nothing and cannot distinguish a free main thread from a blocked one. A
-     * timer measures event-loop availability, which is the actual claim - and a
-     * synchronous 66 ms kernel call would show up as one 66 ms gap.
+     * A self-rescheduling MessageChannel, not requestAnimationFrame and not a
+     * timer. rAF is out because headless Chrome composites lazily and fires
+     * almost no frames, so it cannot tell a free main thread from a blocked
+     * one. A timer was the obvious replacement and measured the right thing -
+     * event-loop availability, where a synchronous 66 ms kernel call shows up
+     * as one 66 ms gap - but it is not portable: on the GitHub runner this
+     * probe collected zero samples across a 417 ms window, because a page
+     * Chrome considers backgrounded has its timers aligned to about one a
+     * second. The three --disable-*-throttling launch flags below do not
+     * prevent it, and the page reports itself visible either way, so there is
+     * nothing to detect and correct.
      *
-     * The 4 ms period is the browser's own clamp for nested timers, so the
-     * baseline gap is ~4-6 ms and anything at frame scale stands out.
+     * A postMessage task is not a timer, so no clamp and no alignment applies
+     * to it. The cost is that it ticks as fast as the queue drains - roughly
+     * 200k times a second, against a timer's 250 - which keeps the main thread
+     * busy. That is affordable here and does not bias the result: every probe
+     * pays it equally, which is what the idle baseline is for.
+     *
+     * The floor is now sub-millisecond rather than the timer's 4-6 ms, so
+     * anything at frame scale stands out further than it did.
      */
     const during = async (label, run) => {
       const gaps = [];
       let last = performance.now();
       let running = true;
-      const tick = () => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
         const now = performance.now();
         gaps.push(now - last);
         last = now;
-        if (running) setTimeout(tick, 4);
+        if (running) channel.port2.postMessage(0);
       };
-      setTimeout(tick, 4);
+      channel.port2.postMessage(0);
 
       const started = performance.now();
       const value = await run();
       const wallMs = performance.now() - started;
       running = false;
+      channel.port1.close();
+      channel.port2.close();
 
       // The first sample spans probe setup rather than the operation.
       return {

@@ -131,11 +131,18 @@ async function repeat(
 /**
  * Samples main-thread availability while an operation runs.
  *
- * A self-rescheduling timer, not `requestAnimationFrame`: a headless browser
- * composites lazily and fires almost no frames, so a frame probe cannot tell a
- * free main thread from a blocked one. The 4 ms period is the browser's own
- * clamp for nested timers, so the idle gap is ~4-6 ms and anything at frame
- * scale stands out.
+ * A self-rescheduling `MessageChannel`, not `requestAnimationFrame` and not a
+ * timer. A frame probe is out because a headless browser composites lazily and
+ * fires almost no frames, so it cannot tell a free main thread from a blocked
+ * one. A timer measured the right thing but is not portable: on the GitHub
+ * runner it collected zero samples across a 417 ms window, because a page the
+ * browser considers backgrounded has its timers aligned to about one a second.
+ * A postMessage task is not a timer, so nothing clamps or aligns it. It ticks
+ * as fast as the queue drains, which keeps the main thread busy - affordable
+ * here, and paid equally by every probe including the idle baseline.
+ *
+ * The floor is sub-millisecond rather than the timer's 4-6 ms, so anything at
+ * frame scale stands out further than it did.
  *
  * This is the same probe the Worker stage used on kernel operations, pointed at
  * persistence instead - the design note asks specifically whether saving
@@ -159,18 +166,21 @@ async function during<T>(
   let last = performance.now();
   let running = true;
 
-  const tick = (): void => {
+  const channel = new MessageChannel();
+  channel.port1.onmessage = (): void => {
     const now = performance.now();
     gaps.push(now - last);
     last = now;
-    if (running) setTimeout(tick, 4);
+    if (running) channel.port2.postMessage(0);
   };
-  setTimeout(tick, 4);
+  channel.port2.postMessage(0);
 
   const started = performance.now();
   const value = await run();
   const wallMs = performance.now() - started;
   running = false;
+  channel.port1.close();
+  channel.port2.close();
 
   // The first sample spans probe setup rather than the operation.
   const measured = gaps.slice(1);
@@ -181,7 +191,12 @@ async function during<T>(
       bytes,
       iterations,
       wallMs: round(wallMs),
-      worstStallMs: round(Math.max(0, ...measured)),
+      // A reduce rather than `Math.max(0, ...measured)`: the probe now collects
+      // samples by the hundred thousand, and spreading that many arguments
+      // overflows the call stack.
+      worstStallMs: round(
+        measured.reduce((worst, gap) => (gap > worst ? gap : worst), 0),
+      ),
       medianStallMs: round(median(measured)),
       samples: measured.length,
     },
