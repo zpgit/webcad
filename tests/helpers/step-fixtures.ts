@@ -123,12 +123,26 @@ export const ASSEMBLY_FIXTURE = {
   /** `STYLED_ITEM` count: the whole part, and one of its faces. */
   styledItemCount: 2,
 
-  /** Occurrences of the one part. */
-  instanceCount: 2,
+  /**
+   * Every node in the tree, the root included.
+   *
+   * Two of these numbers were wrong in the first draft of this helper and are
+   * corrected against the file rather than against what a reader reports. It
+   * holds three PRODUCTs, three NEXT_ASSEMBLY_USAGE_OCCURRENCEs and exactly one
+   * MANIFOLD_SOLID_BREP, so: four nodes, two of which place the single part.
+   * The draft said two nodes - counting only the occurrences of the part - and
+   * one grouping node, having forgotten that `carrier` is one as much as
+   * `cradle` is.
+   */
+  nodeCount: 4,
+  /** Nodes that place the part: `bracket-1` and `bracket-2`. */
+  placedInstanceCount: 2,
+  /** `carrier` and `cradle`: children, no geometry of their own. */
+  groupingNodeCount: 2,
   /** carrier -> cradle -> bracket. */
   treeDepth: 3,
-  /** `cradle`: children, no geometry. */
-  groupingNodeCount: 1,
+  /** One MANIFOLD_SOLID_BREP, so one body however many times it is placed. */
+  partCount: 1,
 
   /** The one part, as authored: a 10 mm box. */
   part: {
@@ -172,13 +186,44 @@ export const ASSEMBLY_FIXTURE = {
   /**
    * The second occurrence's placement as a 3x4 row-major transform, which is
    * how a placement crosses the kernel boundary and how the document stores it.
-   * Rotation about Z by cos 0.6 / sin 0.8, then the cradle's lift.
+   * Rotation about Z by cos 0.6 / sin 0.8.
+   *
+   * PARENT-RELATIVE, and the two forms are given separately because the
+   * difference is a rule and not an accident. The kernel returns each
+   * occurrence's transform relative to its parent, because composition needs
+   * the tree and the kernel does not keep one; the document layer composes.
+   * So `local` has no Z lift in it and `world` has the cradle's +5 mm - and a
+   * test that checks composition has something to check it against rather than
+   * one number that could be either.
    */
-  secondOccurrencePlacement: [
+  secondOccurrenceLocalPlacement: [
+    0.6, -0.8, 0, -20,
+    0.8, 0.6, 0, 0,
+    0, 0, 1, 0,
+  ],
+  secondOccurrenceWorldPlacement: [
     0.6, -0.8, 0, -20,
     0.8, 0.6, 0, 0,
     0, 0, 1, 5,
   ],
+
+  /**
+   * Names, as they come back rather than as the file spells them.
+   *
+   * Unlike every other number here this is an observation about OCCT's reader,
+   * not a property this project wrote into the file, and it is marked as one.
+   * The file names three products; the reader gives each OCCURRENCE a suffixed
+   * name of its own - `bracket-1`, `bracket-2` - while the part keeps the bare
+   * product name. That matters beyond cosmetics: it is the evidence that the
+   * distinction between naming a part and naming one occurrence of it survives
+   * translation, which the design assumed and could not confirm until a reader
+   * existed to ask.
+   */
+  readerNames: {
+    root: 'carrier',
+    occurrences: ['cradle-1', 'bracket-1', 'bracket-2'],
+    part: 'bracket',
+  },
 } as const;
 
 export function assemblyFixturePath(): string {
@@ -230,6 +275,33 @@ export const THIRD_PARTY_ASSEMBLY = {
 
   /** What a structure-blind reader produces: every occurrence, flattened. */
   flattenedBodyCount: 18,
+
+  /**
+   * Distinct part geometries, counted as MANIFOLD_SOLID_BREP in the file.
+   *
+   * LBRACKET, BOLT, NUT, ROD, PLATE. The file stores each once and places them
+   * eighteen times, so this against `flattenedBodyCount` is the whole case for
+   * instancing stated by the file itself rather than by our reader: 5 bodies or
+   * 18, for the same assembly.
+   */
+  distinctPartCount: 5,
+
+  /**
+   * Nodes in the tree once shared SUBASSEMBLIES are expanded.
+   *
+   * Larger than the 13 NEXT_ASSEMBLY_USAGE_OCCURRENCEs above, and the gap is
+   * the point. The file stores structure as a DAG - `NBA` is one definition
+   * used three times under each of two `LBA`s - while a tree has to give each
+   * use its own node. So structure sharing is expanded and GEOMETRY sharing is
+   * not: 28 nodes, still only 5 bodies. A representation that collapsed the
+   * nodes too would have to make a node's identity depend on the path taken to
+   * reach it, which is the positional-reference problem in another costume.
+   */
+  expandedNodeCount: 28,
+  /** carrier -> LBA -> NBA -> BOLT. */
+  treeDepth: 4,
+  /** AS1, two LBAs, six NBAs, one RODAS. */
+  groupingNodeCount: 10,
 
   /** Overall extent of the assembly as placed, in mm. */
   bounds: { min: [-100, -75, -7], max: [100, 75, 80] },

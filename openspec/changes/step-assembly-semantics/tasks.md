@@ -188,12 +188,98 @@ stays reviewable and the word "part" means one thing for the rest of the stage.
 
 ## 4. Structure-aware import (C++)
 
-- [ ] 4.1 Add the CAF read path to `native/src/kernel.{hpp,cpp}`: `STEPCAFControl_Reader` over the same staging-buffer `std::istringstream` the current reader uses, transferring into a `TDocStd_Document` created inside the call. Keep the existing plain-reader path reachable — `step-translation` now requires that a flat import remains a supported mode, not a degenerate assembly.
-- [ ] 4.2 Walk the resulting `XCAFDoc_ShapeTool` and produce two things: one registered body per distinct part shape, and a flat list of instance records (parent index, part index or none, 12-double transform, name). Free shapes with no structure yield bodies and no instances.
-- [ ] 4.3 Register each part exactly once. A part referenced by twenty components must produce one `BodyId` — dedupe on the shape the shape-tool reports for the part label, not on the located instance shape, which differs per occurrence.
-- [ ] 4.4 Release the `TDocStd_Document` before the call returns, on every path including failure, and assert in the harness that no label or document reference is reachable from the result.
-- [ ] 4.5 Report structure counts: instances, tree depth, named entities preserved, grouping nodes, and — still — the categories dropped, now named individually rather than as one number.
-- [ ] 4.6 Handle the failure paths the CAF reader adds without weakening the ones MVP-2 established: a file whose structure is cyclic or whose component references do not resolve, a part label with no shape, and a structure that transfers while the geometry does not. All through the existing `guarded`/`fail` machinery, all leaving the module usable.
+- [x] 4.1 Add the CAF read path to `native/src/kernel.{hpp,cpp}`: `STEPCAFControl_Reader` over the same staging-buffer `std::istringstream` the current reader uses, transferring into a `TDocStd_Document` created inside the call. Keep the existing plain-reader path reachable — `step-translation` now requires that a flat import remains a supported mode, not a degenerate assembly.
+- [x] 4.2 Walk the resulting `XCAFDoc_ShapeTool` and produce two things: one registered body per distinct part shape, and a flat list of instance records (parent index, part index or none, 12-double transform, name). Free shapes with no structure yield bodies and no instances.
+- [x] 4.3 Register each part exactly once. A part referenced by twenty components must produce one `BodyId` — dedupe on the shape the shape-tool reports for the part label, not on the located instance shape, which differs per occurrence.
+- [x] 4.4 Release the `TDocStd_Document` before the call returns, on every path including failure, and assert in the harness that no label or document reference is reachable from the result.
+- [x] 4.5 Report structure counts: instances, tree depth, named entities preserved, grouping nodes, and — still — the categories dropped, now named individually rather than as one number.
+- [x] 4.6 Handle the failure paths the CAF reader adds without weakening the ones MVP-2 established: a file whose structure is cyclic or whose component references do not resolve, a part label with no shape, and a structure that transfers while the geometry does not. All through the existing `guarded`/`fail` machinery, all leaving the module usable.
+
+### Notes from group 4, for the findings document
+
+- **The size bill for waking the XCAF toolkits: +2,472,649 bytes raw, +479,899
+  brotli.** 12,293,109 -> 14,765,758 raw (+20.1%), 2,957,941 -> 3,437,840 brotli
+  (+16.2%), loader 108,877 -> 120,284. So "already linked, therefore nearly
+  free" was wrong, and by a wide margin: the toolkits were on the link line but
+  dead-stripped, exactly as MVP-2 predicted they would be, and referencing them
+  brings in the whole OCAF attribute machinery. Measured against the task 1.1
+  baseline, which the rebuild reproduced byte-identically before any of this
+  landed.
+- **Instancing measured, on a file we did not write.** `as1-md-214.stp` gives
+  **5 bodies instead of 18** - and the 5 is confirmed against the file itself,
+  which contains exactly 5 `MANIFOLD_SOLID_BREP` entities against 9 products
+  and 13 `NEXT_ASSEMBLY_USAGE_OCCURRENCE`s. The dedup claim therefore rests on
+  the file's own census and not on our reader agreeing with itself. The
+  hand-authored fixture likewise has 1 `MANIFOLD_SOLID_BREP` and yields 1 body
+  from 2 occurrences.
+- **Structure sharing is expanded; geometry sharing is not.** AS1 has 13 NAUOs
+  but the walk produces **28 nodes**, because the file stores a DAG - `NBA` is
+  one definition used three times under each of two `LBA`s - and a tree has to
+  give each use its own node. Still only 5 bodies. Collapsing the nodes too
+  would mean a node's identity depending on the path taken to reach it, which
+  is the positional-reference problem in another costume, so the expansion is
+  the right trade and is now stated in the fixture helper rather than left to
+  be rediscovered.
+- **Occurrence names and part names are genuinely distinct, and OCCT hands both
+  over.** The part is `bracket`; its two occurrences are `bracket-1` and
+  `bracket-2`. So the design's assumption that the two levels are separable
+  holds for names, and the kernel keeps them apart: `StepInstance::name` is the
+  occurrence's, `partNames` is the part's, and nothing falls back from one to
+  the other. A display that wants a fallback can have one; a translation that
+  performs it has destroyed the difference before anyone could see it.
+- **Placements come back parent-relative, and the fixture helper said world.**
+  The kernel returns each occurrence's transform relative to its parent,
+  because composing needs the tree and the kernel does not keep one. The
+  hand-authored fixture predicted `[..., -20, ..., 5]` for the second bracket;
+  the kernel returns that with Z 0, and composing the cradle's +5 mm lift gives
+  the predicted value exactly. Both forms are now in the helper, named, so a
+  test can check composition instead of assuming it.
+- **Two of the fixture helper's own counts were wrong** and are corrected
+  against the file rather than against the reader: `nodeCount` is 4 (it said 2,
+  counting only the occurrences of the part) and `groupingNodeCount` is 2 (it
+  said 1, having forgotten that `carrier` is a grouping node as much as
+  `cradle` is). Caught because the reader disagreed with the helper and the
+  file settled it.
+- **The document-leak check was vacuous, and the replacement is a new stat.**
+  The first instrument was peak WASM heap across repeated imports. Removing the
+  `Close` deliberately produced the *identical* heap figure - 24,248,320 both
+  ways - because a few leaked small documents fit inside a heap that has
+  already grown. `KernelStats::openTranslationDocuments` reports
+  `TDocStd_Application::NbDocuments()` instead, and the same negative control
+  now shows 0 with the close against a climb to 30 across 24 imports. An
+  invariant worth having is worth being able to check; this one is checked on
+  every failure path too.
+- **A cyclic assembly never reaches the cycle guard.** A hand-built file closing
+  `carrier -> cradle -> bracket -> carrier` parses - the census counts its 4
+  NAUOs - and OCCT then transfers *nothing*: zero roots, zero free shapes, no
+  error reported. So the guard in `walkOccurrence` is unexercised and is
+  reported as such rather than claimed as tested; it stays because the cost is
+  a `std::find` over a stack and the alternative failure is unbounded recursion
+  inside a WASM module, which is undiagnosable from outside.
+- **That case did expose a misleading message, which is fixed.** Both modes
+  reported "STEP payload contained no transferable shape" for a file with a
+  visible solid in it. A census that counted assembly occurrences against a
+  reader that resolved no root is a distinguishable signature, so the message
+  now says that instead - without naming a cause, because a cycle is only one
+  of several defects with the same signature and OCCT reports no error for any
+  of them.
+- **The two modes disagreed about an empty file, and that was worse than
+  cosmetic.** Flat returned EmptyResult; CAF returned TranslationFailed,
+  because `STEPCAFControl_Reader::Transfer` returns false when handed nothing.
+  One is a success reporting zero bodies and the other becomes a thrown error a
+  layer up, for identical bytes. The root count now decides, and a file that
+  declared roots and still would not transfer keeps saying so.
+- **What the CAF reader is told not to read.** Layers, validation properties,
+  GD&T, materials, views, metadata and SHUO are all switched off; OCCT defaults
+  every one of them on. Left on, the reader would build attributes this stage
+  discards and the cost would land in the reader-comparison as a cost of
+  *structure*, which it is not. The dropped categories are counted off the
+  entity census instead - one pass that is already being made - and are now
+  four named counters rather than MVP-2's single "you lost something".
+- **Cost: no TypeScript beyond keeping the boundary compilable.** `structure:
+  false` had to be passed explicitly at both call sites because embind requires
+  every field of a value object; the application default is group 7's to
+  choose. 146 tests still pass, unchanged.
 
 ## 5. Appearance extraction (C++)
 

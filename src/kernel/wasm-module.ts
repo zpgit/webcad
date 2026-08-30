@@ -134,6 +134,7 @@ export interface RawTessellationParams {
 
 export interface RawStepTranslationOptions {
   shapeProcessing: boolean;
+  structure: boolean;
 }
 
 /**

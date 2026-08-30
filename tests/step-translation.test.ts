@@ -483,7 +483,7 @@ test('a structure-blind reader flattens the assembly to placed bodies', { skip }
 
   assert.equal(
     report.bodyIds.length,
-    ASSEMBLY_FIXTURE.instanceCount,
+    ASSEMBLY_FIXTURE.placedInstanceCount,
     'one body per occurrence, the part having been instanced twice',
   );
 

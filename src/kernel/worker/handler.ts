@@ -487,6 +487,12 @@ export class KernelHandler {
 
       const result = mod.importStep({
         shapeProcessing: options.shapeProcessing ?? false,
+        // embind requires every field of a value object, so this is supplied
+        // rather than left to the C++ default. False keeps this layer where
+        // MVP-2 left it while the kernel's structure-aware path lands
+        // underneath it; giving a caller a way to ask for structure is the
+        // boundary work, and it is not this.
+        structure: false,
       });
       // Surfaced so the operation record carries the translation's own status
       // rather than the staging call's.
@@ -571,6 +577,8 @@ export class KernelHandler {
       result = this.#timed('exportStep', () =>
         mod.exportStep(list, {
           shapeProcessing: options.shapeProcessing ?? false,
+          // As above: required by embind, and the writer ignores it.
+          structure: false,
         }),
       );
     } finally {

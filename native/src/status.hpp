@@ -173,6 +173,34 @@ struct SerializeResult {
   std::string occtVersion;
 };
 
+// One occurrence in an imported assembly.
+//
+// Everything here is an index, a number, or text. There is no label, no STEP
+// entity, and nothing that can be resolved back into the translator's scratch
+// document - which is what lets the document layer own structure outright
+// while the kernel stays stateless about it.
+struct StepInstance {
+  // Index into the same result's instance list, or -1 for a root. A parent
+  // always precedes its children, so the tree can be rebuilt in one pass
+  // without a second lookup.
+  int32_t parent = -1;
+
+  // Index into the registered bodies: the body is firstBodyId + part. -1 means
+  // a grouping node - an assembly that carries no shape of its own, which real
+  // files contain and a tree that could not represent one would have to
+  // flatten away.
+  int32_t part = -1;
+
+  // The name the file gave THIS occurrence, empty when it gave none.
+  //
+  // Deliberately not defaulted to the part's name. The two are different facts,
+  // the part's own name travels in partNames, and a display that wants to fall
+  // back can - but a translation that falls back has destroyed the difference
+  // before anyone could see it. Foreign text: any bytes the file contained,
+  // carried as UTF-8, never matched against and never used as an identity.
+  std::string name;
+};
+
 // Result of translating a STEP payload into bodies.
 //
 // Everything here is a count, a scalar, or a name. No STEP entity, product
@@ -209,11 +237,87 @@ struct StepImportResult {
   std::string workingUnit;
   bool unitWasAssumed = false;
 
-  // STEP semantics this stage does not preserve, counted so the loss is stated
-  // rather than discovered. Preserving them needs XCAF and is MVP-3's.
+  // The file's own census, counted off the parsed STEP model before any
+  // transfer. These say what the file DECLARED, and they are the denominator
+  // for what arrived: an assembly node count of 13 against 13 instances is a
+  // structure fully carried, and against 4 it is not. Counted the same way in
+  // both reader modes, so the two are comparable.
   uint32_t namedProductCount = 0;
   uint32_t styledItemCount = 0;
   uint32_t assemblyNodeCount = 0;
+
+  // STEP semantics this stage still drops, each named rather than summed.
+  //
+  // MVP-2 reported one number for everything beyond shape, which said "you
+  // lost something" without saying what. These are counted individually so a
+  // file whose value is in its tolerances is distinguishable from one whose
+  // value is in its layers - and so the next stage to pick one of them up has
+  // a baseline. Counted off the entity census, not read into the document:
+  // the CAF reader's layer, property, tolerance and material modes are all
+  // turned off, because paying to build attributes this stage discards would
+  // show up in the reader-cost measurement as a cost of structure.
+  uint32_t droppedLayerCount = 0;
+  uint32_t droppedMaterialCount = 0;
+  uint32_t droppedGeometricToleranceCount = 0;
+  uint32_t droppedDimensionCount = 0;
+
+  // --- Structure -----------------------------------------------------------
+
+  // Whether the caller asked for structure at all.
+  //
+  // Reported so that "no tree" never has to be guessed at. A flat import and an
+  // assembly-free file both return no instances, and they mean entirely
+  // different things: one is what the caller asked for, the other is what the
+  // file contained.
+  bool structureRequested = false;
+
+  // Whether the file actually had product structure. False with
+  // structureRequested true means the file was flat, and the bodies are its
+  // top-level shapes.
+  bool structurePresent = false;
+
+  // The occurrences, parents before children. Empty unless structure was
+  // requested and the file had some.
+  std::vector<StepInstance> instances;
+
+  // Placements, 12 doubles per instance, row-major 3x4, at 12 * the instance's
+  // own index - so the list is exactly 12x the instance list and a consumer
+  // needs no offset field.
+  //
+  // Held beside the instances rather than inside them because embind would
+  // otherwise make each instance's placement its own heap-backed vector object
+  // for a caller to free one at a time. Two allocations to release instead of
+  // one per occurrence is not a micro-optimization; it is the difference
+  // between a leak that is hard and easy to avoid.
+  //
+  // Each placement is the occurrence's transform relative to its PARENT, not
+  // to the world. Composition down the tree is the document layer's, which is
+  // the only layer that knows the tree after this call returns.
+  std::vector<double> placements;
+
+  // One per registered body, in body order, empty where the file named nothing.
+  // A part's name and an occurrence's name are different facts and are kept
+  // apart; see StepInstance::name.
+  std::vector<std::string> partNames;
+
+  // Deepest path in the tree, roots counting as 1. Zero when there is no tree.
+  uint32_t treeDepth = 0;
+
+  // Occurrences carrying no shape of their own. Real assemblies have them, and
+  // a count of zero against a positive instance count says every node is a
+  // placed part.
+  uint32_t groupingNodeCount = 0;
+
+  // Names that survived, against namedProductCount above.
+  uint32_t namedInstanceCount = 0;
+  uint32_t namedPartCount = 0;
+
+  // Components whose referred label could not be resolved to anything.
+  //
+  // Skipped with their subtree rather than failing the import, on the same
+  // reasoning that admits open shells: a defect in one branch of a foreign
+  // file should cost that branch, not the file. Counted so it is never silent.
+  uint32_t unresolvedInstanceCount = 0;
 
   // Shape-processing operations that actually ran, comma-separated, empty when
   // none did. OCCT runs FixShape on read by default; a measurement cannot
@@ -275,6 +379,18 @@ struct KernelStats {
 
   // Bytes held by the mesh cache.
   double meshCacheBytes = 0.0;
+
+  // XCAF documents the translator currently holds open.
+  //
+  // Always zero outside a translation call, and that is the point of reporting
+  // it. The scratch document a structured import builds is the one thing in
+  // this kernel that leaks silently and expensively - it retains every shape it
+  // transferred, and nothing about a later operation would look wrong - so the
+  // invariant is made observable rather than argued for. The instrument this
+  // replaced was peak heap across repeated imports, which turned out not to
+  // move at all: a leaked document simply fits inside a heap that has already
+  // grown, so the check passed whether or not the close happened.
+  uint32_t openTranslationDocuments = 0;
 };
 
 }  // namespace webcad

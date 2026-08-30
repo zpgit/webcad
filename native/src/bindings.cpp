@@ -19,6 +19,7 @@
 // modeling operation. What holds for both is the outbound rule: translation
 // consumes foreign bytes and still returns nothing but handles.
 
+#include <string>
 #include <vector>
 
 #include <emscripten/bind.h>
@@ -103,6 +104,15 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("firstBodyId", &RestoreResult::firstBodyId)
       .field("bodyCount", &RestoreResult::bodyCount);
 
+  // An occurrence, as three plain values. Note what a caller cannot ask this
+  // for: which label it came from, which STEP entity backs it, or any handle
+  // to the tree it sits in. It knows its parent's position in a list and which
+  // body it places, and the layer above builds a tree from that.
+  value_object<StepInstance>("StepInstance")
+      .field("parent", &StepInstance::parent)
+      .field("part", &StepInstance::part)
+      .field("name", &StepInstance::name);
+
   value_object<StepImportResult>("StepImportResult")
       .field("status", &StepImportResult::status)
       .field("message", &StepImportResult::message)
@@ -117,6 +127,21 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("namedProductCount", &StepImportResult::namedProductCount)
       .field("styledItemCount", &StepImportResult::styledItemCount)
       .field("assemblyNodeCount", &StepImportResult::assemblyNodeCount)
+      .field("droppedLayerCount", &StepImportResult::droppedLayerCount)
+      .field("droppedMaterialCount", &StepImportResult::droppedMaterialCount)
+      .field("droppedGeometricToleranceCount",
+             &StepImportResult::droppedGeometricToleranceCount)
+      .field("droppedDimensionCount", &StepImportResult::droppedDimensionCount)
+      .field("structureRequested", &StepImportResult::structureRequested)
+      .field("structurePresent", &StepImportResult::structurePresent)
+      .field("instances", &StepImportResult::instances)
+      .field("placements", &StepImportResult::placements)
+      .field("partNames", &StepImportResult::partNames)
+      .field("treeDepth", &StepImportResult::treeDepth)
+      .field("groupingNodeCount", &StepImportResult::groupingNodeCount)
+      .field("namedInstanceCount", &StepImportResult::namedInstanceCount)
+      .field("namedPartCount", &StepImportResult::namedPartCount)
+      .field("unresolvedInstanceCount", &StepImportResult::unresolvedInstanceCount)
       .field("shapeProcessing", &StepImportResult::shapeProcessing)
       .field("payloadByteLength", &StepImportResult::payloadByteLength);
 
@@ -135,7 +160,8 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("cachedMeshCount", &KernelStats::cachedMeshCount)
       .field("wasmMemoryBytes", &KernelStats::wasmMemoryBytes)
       .field("wasmPeakMemoryBytes", &KernelStats::wasmPeakMemoryBytes)
-      .field("meshCacheBytes", &KernelStats::meshCacheBytes);
+      .field("meshCacheBytes", &KernelStats::meshCacheBytes)
+      .field("openTranslationDocuments", &KernelStats::openTranslationDocuments);
 
   // --- Parameters ----------------------------------------------------------
 
@@ -169,12 +195,26 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
   // because OCCT's default alters geometry in both directions and this stage
   // has to be able to measure with it off.
   value_object<StepTranslationOptions>("StepTranslationOptions")
-      .field("shapeProcessing", &StepTranslationOptions::shapeProcessing);
+      .field("shapeProcessing", &StepTranslationOptions::shapeProcessing)
+      .field("structure", &StepTranslationOptions::structure);
 
   // The order of this list is the order bodies are written into a checkpoint,
   // and it is the caller's to decide: the registry stores shapes unordered, so
   // there is no kernel-side ordering a document could pin its identities to.
   register_vector<uint32_t>("BodyIdList");
+
+  // Structure crosses as three flat lists rather than as a tree of objects.
+  //
+  // Every one of these is heap-backed and has to be freed by the caller, which
+  // is the argument for there being three of them and not one per occurrence:
+  // a placement held inside StepInstance would make each occurrence its own
+  // vector to release, turning a leak from something you avoid once into
+  // something you avoid N times. The lists are read in lockstep - instance i
+  // owns placements[12*i .. 12*i+11] - and nothing in them is a reference to
+  // anything the kernel still holds.
+  register_vector<StepInstance>("StepInstanceList");
+  register_vector<double>("PlacementList");
+  register_vector<std::string>("NameList");
 
   // --- Operations ----------------------------------------------------------
 

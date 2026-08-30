@@ -126,6 +126,20 @@ struct StepTranslationOptions {
   // setting the fidelity comparison recommends becomes the application's, and
   // the result reports which operations actually ran either way.
   bool shapeProcessing = false;
+
+  // Read product structure through XCAF rather than shapes alone.
+  //
+  // Off is MVP-2's behaviour exactly: STEPControl_Reader, top-level shapes,
+  // compounds flattened, no tree. It stays reachable because a caller that
+  // wants the geometry of an assembly and nothing else should not have to pay
+  // for a document it will discard, and because a flat import is a supported
+  // operation rather than a degenerate assembly.
+  //
+  // Defaulted off so that adding this field changed no existing behaviour. The
+  // application's default is the TypeScript layer's to choose and is not this
+  // one - embind requires every field of a value object to be supplied anyway,
+  // so a JavaScript caller never inherits this.
+  bool structure = false;
 };
 
 // Translates the staged payload into bodies, issuing a handle for each.
