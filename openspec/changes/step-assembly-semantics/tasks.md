@@ -284,7 +284,7 @@ stays reviewable and the word "part" means one thing for the rest of the stage.
 ## 5. Appearance extraction (C++)
 
 - [x] 5.1 Read shape-level colour through `XCAFDoc_ColorTool` for each part and each component, keeping them distinct: the instance override is what makes one occurrence recolourable, and a reader that resolves it before we see it would erase the distinction. Confirm which of the two OCCT actually exposes — this is an open question in the design, and the answer belongs in the findings.
-- [ ] 5.1a **Deferred, with a reason and a plan (found in 5.1).** An occurrence-level colour override still cannot be verified end to end. AP214 expresses it as a `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM`, OCCT routes that into a SHUO rather than onto the component label, and a hand-authored one parses without producing an instance colour — with no way from outside the library to tell whether the authoring or the reader is at fault. No local fixture contains one (`OVER_RIDING` appears in none of them, including all four published AS1 variants). Settle it in group 6 by writing a document with an instance colour through `STEPCAFControl_Writer` and re-importing it: if OCCT's own writer and reader cannot round-trip one between them, that answers the design's open question better than more hand-authoring would.
+- [x] 5.1a **Deferred, with a reason and a plan (found in 5.1).** An occurrence-level colour override still cannot be verified end to end. AP214 expresses it as a `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM`, OCCT routes that into a SHUO rather than onto the component label, and a hand-authored one parses without producing an instance colour — with no way from outside the library to tell whether the authoring or the reader is at fault. No local fixture contains one (`OVER_RIDING` appears in none of them, including all four published AS1 variants). Settle it in group 6 by writing a document with an instance colour through `STEPCAFControl_Writer` and re-importing it: if OCCT's own writer and reader cannot round-trip one between them, that answers the design's open question better than more hand-authoring would.
 - [x] 5.2 Read per-face colour into an array indexed by the part shape's `TopExp_Explorer(TopAbs_FACE)` order, paired with the face count it was built against. Same order as the mesher's loop at `native/src/kernel.cpp:449` — one order, documented in one place, used by both.
 - [x] 5.3 Emit face ranges from the mesher: `(indexOffset, indexCount)` per face in visitation order, alongside the existing buffers. Assert they tile the index buffer without gap or overlap and that their count equals the reported face count.
 - [x] 5.4 Cross colour to the boundary as plain triples plus ranges. No face index, no face handle, no identity — `appearance-attributes` fences this explicitly, and the fence is only real if the C++ surface has nothing to hand over.
@@ -355,13 +355,91 @@ stays reviewable and the word "part" means one thing for the rest of the stage.
 
 ## 6. Export with structure (C++)
 
-- [ ] 6.1 Add the CAF write path: build a fresh `TDocStd_Document` from the supplied structure — one shape label per body, one component per instance with its transform, names and colours set — and `STEPCAFControl_Writer` it into the existing `std::ostringstream`/staging path.
-- [ ] 6.2 Refuse a structure that does not resolve: an instance naming a body outside the exported set, a cyclic parent chain, a transform that is not 12 numbers. Fail before writing a byte, naming the defect.
-- [ ] 6.3 Write colours at the levels they were held, and nothing else: no resolved display colour, no fabricated colour for an uncoloured part.
-- [ ] 6.4 Confirm what the writer actually emits — one part definition and N occurrences, or N duplicated parts. This is the design's second open question; measure it by re-importing our own export and counting, and by comparing the entity census against the source file.
-- [ ] 6.5 Keep the flat export path exactly as it is for a session with no structure, including its byte output, so a locally authored model exports as it did before.
-- [ ] 6.5a **Not anticipated (found in task 2.3).** Set the writer's assembly mode explicitly on every export. OCCT fabricates an assembly for *any* multi-body export — a root product plus one child per body with invented names — so "a flat session exports flat" is not something the current code does, and cannot be had by leaving the writer alone. A test pins the current fabrication (`tests/step-translation.test.ts`, "survives our own round trip") and will fail when this lands, which is the point.
-- [ ] 6.6 Verify all of section 4-6 against the raw module before any TypeScript exists, extending the MVP-1/MVP-2 smoke harness: import the hand-authored fixture, census structure and colour, export, re-import, compare, and exercise every failure path for handle leaks and module aborts.
+- [x] 6.1 Add the CAF write path: build a fresh `TDocStd_Document` from the supplied structure — one shape label per body, one component per instance with its transform, names and colours set — and `STEPCAFControl_Writer` it into the existing `std::ostringstream`/staging path.
+- [x] 6.2 Refuse a structure that does not resolve: an instance naming a body outside the exported set, a cyclic parent chain, a transform that is not 12 numbers. Fail before writing a byte, naming the defect.
+- [x] 6.3 Write colours at the levels they were held, and nothing else: no resolved display colour, no fabricated colour for an uncoloured part.
+- [x] 6.4 Confirm what the writer actually emits — one part definition and N occurrences, or N duplicated parts. This is the design's second open question; measure it by re-importing our own export and counting, and by comparing the entity census against the source file.
+- [x] 6.5 Keep the flat export path exactly as it is for a session with no structure, including its byte output, so a locally authored model exports as it did before.
+- [x] 6.5a **Not anticipated (found in task 2.3).** Set the writer's assembly mode explicitly on every export. OCCT fabricates an assembly for *any* multi-body export — a root product plus one child per body with invented names — so "a flat session exports flat" is not something the current code does, and cannot be had by leaving the writer alone. A test pins the current fabrication (`tests/step-translation.test.ts`, "survives our own round trip") and will fail when this lands, which is the point.
+- [x] 6.6 Verify all of section 4-6 against the raw module before any TypeScript exists, extending the MVP-1/MVP-2 smoke harness: import the hand-authored fixture, census structure and colour, export, re-import, compare, and exercise every failure path for handle leaks and module aborts.
+
+### Notes from group 6, for the findings document
+
+- **6.6 changed shape, because the harness it was meant to extend does not
+  exist.** MVP-1 and MVP-2 each verified their C++ with a throwaway script under
+  gitignored `native/build/`, so neither survived its stage and CI never ran
+  either. Rather than write a third, the checks are now
+  `tests/kernel-structure.test.ts` — 13 tests against the raw Emscripten module,
+  in `npm test`, so CI runs them. Deliberately not through the TypeScript
+  boundary: the properties are the C++'s, and a test crossing two layers cannot
+  say which of them broke. 146 tests became 159, none skipped.
+- **The new tests were made to fail on purpose, and the first attempt cascaded.**
+  Flipping two fixture constants produced four failures, two of them in tests
+  that only broke because an earlier one had left bodies unreleased and they
+  asserted `liveBodyCount === 0`. A leak is a delta, not an absolute; changed to
+  compare against a count taken at the start, and the same control now produces
+  exactly one failure.
+
+- **6.4 answered: one part definition, N occurrences.** The writer emits
+  occurrences, not duplicated geometry. Our export of the hand-authored fixture
+  carries 1 `MANIFOLD_SOLID_BREP` and 3 `NEXT_ASSEMBLY_USAGE_OCCURRENCE`s,
+  matching the source exactly; our export of AS1 carries 5 breps for 18 placed
+  occurrences, the same 5 the source has.
+- **5.1a answered, and the answer is yes.** An occurrence-level colour override
+  round-trips. Writing one through `SetInstanceColor` and re-importing gives it
+  back on exactly the occurrence it was given to — `bracket-2` at
+  [0.850, 0.100, 0.100], with no other occurrence carrying one. Deferred twice
+  for want of a file containing an override; OCCT's own writer produced the
+  file, which is what group 5 said to do and it worked first time. The SHUO read
+  path is confirmed against a known-good producer rather than against a guess.
+  **What this does not settle** is whether the hand-authored
+  `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM` from group 5 was malformed or
+  merely unsupported: OCCT's own file is the only one that works here, and it is
+  still our own toolchain on both ends.
+- **The DAG-to-tree expansion costs 2.17x on the wire, and does not compound.**
+  AS1: 72,759 bytes in, 157,750 out. Occurrences 13 -> 27 and products 9 -> 15,
+  which is exactly the 28 nodes and 10 grouping nodes the tree holds. Geometry
+  is untouched — 5 breps in, 5 out. Three successive round trips give
+  157,750 / 157,871 / 157,871 with 28 nodes and 5 bodies every time, so the
+  expansion happens once and is then a fixed point rather than a ratchet. Worth
+  having measured: a representation that grew on every save would be a defect
+  that only showed up on the third save.
+- **OCCT writes a recognized colour by NAME, not as RGB.** Our export of AS1
+  contains zero `COLOUR_RGB` entities and three
+  `DRAUGHTING_PRE_DEFINED_COLOUR('red')`-style ones, because the source colours
+  are exact primaries. Fidelity is unaffected through our own reader — 5
+  coloured parts in, 5 back — but the encoding changed, and a third-party reader
+  that only understands `COLOUR_RGB` would see an uncoloured file. Recorded
+  because it is exactly the kind of loss an internal round trip cannot detect.
+- **The fabricated assembly is gone (6.5a).** `write.step.assembly` defaults to
+  Auto, which turned any multi-body export into a root product with one invented
+  child per body. It is now set to Off explicitly on the flat path, through the
+  writer's own `DESTEP_Parameters` rather than `Interface_Static` — the latter
+  is process-global and a mode set there would outlive the call. The test that
+  pinned the fabrication failed exactly as group 2 predicted it would (0 against
+  2) and now asserts zero.
+- **6.5 and 6.5a were in tension and 6.5a wins.** "Keep the flat export byte
+  output exactly as it is" cannot hold alongside "stop fabricating an assembly":
+  a two-body export's bytes necessarily change. A single-body export is
+  unaffected, which is the part of 6.5 that survives.
+- **A count is not a census, and this caught a real loss.** The first
+  round trip reported four occurrence names out and four back — and the root's
+  had silently become "Open CASCADE STEP translator 8.0 1". A root grouping
+  node's occurrence label IS its definition label, so the code skipped naming it
+  to avoid relabelling a part, and there was no part. Fixed, and every name
+  check in the probe now compares by value.
+- **Cycles are refused by a rule rather than a traversal.** Requiring every
+  parent to precede its child makes a cycle unrepresentable, and it is the same
+  invariant the import already guarantees, so a structure that came from here
+  always satisfies it. Every refusal names its index and its defect: seven of
+  them are exercised, all returning `InvalidParameter` with no payload written.
+- **Two labels per node, and conflating them would have been silent.** The
+  definition is what a node refers to and where children attach; the occurrence
+  is the component label the parent holds and where an occurrence's own name and
+  colour go. They coincide only at a root.
+- **Size after group 6: 15,016,341 raw / 3,492,089 brotli**, from the 12,293,109
+  / 2,957,941 baseline. The writer side of XCAF adds ~236 kB raw on top of the
+  reader's.
 
 ## 7. Kernel boundary and protocol (TypeScript)
 

@@ -364,8 +364,14 @@ structure is lost — worth stating, not worth engineering around at this stage.
   yes** (task 1.2): mesh byte-identical across a round trip for a primitive, a
   Boolean result, a seamed cylinder, and two imported STEP parts, across two
   round trips, and into a fresh module. Per-face colour proceeds as designed.
-- Does `STEPCAFControl_Writer` emit `NEXT_ASSEMBLY_USAGE_OCCURRENCE` for a part
-  label referenced from several components, or duplicate the geometry?
+- ~~Does `STEPCAFControl_Writer` emit `NEXT_ASSEMBLY_USAGE_OCCURRENCE` for a part
+  label referenced from several components, or duplicate the geometry?~~
+  **Answered: occurrences** (task 6.4). Our export of the hand-authored fixture
+  holds one `MANIFOLD_SOLID_BREP` and three occurrences; our export of AS1
+  holds five breps for eighteen placed occurrences, the same five the source
+  has. What does grow is the tree: a shared subassembly is written once per use,
+  so AS1's 13 occurrences become 27 and the file 2.17x larger. Measured across
+  three generations, that expansion is a fixed point rather than a ratchet.
 - AP214 or AP242 for the write schema, and does the choice change whether colour
   and structure survive a round trip through a third-party reader?
 - Is there a STEP assembly with colours, under a licence that permits pinning it,
@@ -378,8 +384,10 @@ structure is lost — worth stating, not worth engineering around at this stage.
   component label and then to the part's own colour, so it reports every
   occurrence of a coloured part as overridden. Measured, and it erased the
   distinction on the fixture. The kernel reads the SHUO directly instead. What
-  remains open is narrower and is tracked as task 5.1a: whether a genuine
-  override round-trips at all, which group 6 can settle with OCCT's own writer.
+  What remained open was tracked as task 5.1a and is now **answered: yes**
+  (group 6). An override written through `SetInstanceColor` and re-imported
+  comes back on exactly the occurrence it was given to, with the colour it was
+  given. The caveat is that OCCT is on both ends of that measurement.
 - Does a STEP colour survive as the number the file wrote? **Yes, if it is read
   as sRGB** (task 5.1). OCCT decodes `COLOUR_RGB` as sRGB and stores it linear,
   so the component accessors return a different colour than the file declared.

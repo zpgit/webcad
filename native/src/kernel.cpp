@@ -35,7 +35,9 @@
 #include <NCollection_Sequence.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Quantity_Color.hxx>
+#include <DESTEP_Parameters.hxx>
 #include <STEPCAFControl_Reader.hxx>
+#include <STEPCAFControl_Writer.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
@@ -74,6 +76,7 @@
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 #include <XCAFApp_Application.hxx>
+#include <cmath>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_ColorType.hxx>
 #include <XCAFDoc_GraphNode.hxx>
@@ -1364,6 +1367,109 @@ RestoreResult restoreBodies() {
 
 namespace {
 
+// Why a structure cannot be written, or empty if it can.
+//
+// Runs before a document exists, so a refusal costs nothing and leaves nothing
+// behind. Every check names the offending index: "the structure is invalid" is
+// not something a caller can act on.
+//
+// Note what is NOT checked, because it cannot happen. A cyclic parent chain is
+// impossible once every parent is required to precede its child, and that rule
+// is worth having for its own sake - it is what lets a consumer build the tree
+// in one pass - so the cycle check the task asks for is this rule rather than a
+// traversal. It is also exactly the invariant the import guarantees, so a
+// structure that came from here always satisfies it.
+std::string structureDefect(const std::vector<uint32_t>& bodyIds,
+                            const StepStructure& structure) {
+  const size_t bodies = bodyIds.size();
+  const size_t nodes = structure.instances.size();
+
+  // Nothing supplied is a flat export, not a malformed structure. Something
+  // half-supplied is malformed, though: placements without instances, or face
+  // colours without parts, is a caller that built a structure and lost part of
+  // it on the way, which is worth saying rather than silently writing flat.
+  if (structure.parts.empty() && nodes == 0) {
+    if (!structure.placements.empty() || !structure.faceColours.empty()) {
+      return "structure has placements or face colours but no instances or "
+             "parts to attach them to";
+    }
+    return {};
+  }
+
+  if (structure.parts.size() != bodies) {
+    return "structure describes " + std::to_string(structure.parts.size()) +
+           " parts for " + std::to_string(bodies) + " bodies";
+  }
+  if (structure.placements.size() != nodes * 12) {
+    return "structure has " + std::to_string(structure.placements.size()) +
+           " placement values for " + std::to_string(nodes) +
+           " instances, expected " + std::to_string(nodes * 12);
+  }
+
+  for (size_t i = 0; i < nodes; ++i) {
+    const StepInstance& node = structure.instances[i];
+    if (node.parent < -1 || node.parent >= static_cast<int32_t>(i)) {
+      return "instance " + std::to_string(i) + " names parent " +
+             std::to_string(node.parent) +
+             ", which does not precede it - a parent must come first, which is"
+             " also what makes a cycle unrepresentable";
+    }
+    if (node.part < -1 || node.part >= static_cast<int32_t>(bodies)) {
+      return "instance " + std::to_string(i) + " references body " +
+             std::to_string(node.part) + ", which is not in the exported set of " +
+             std::to_string(bodies);
+    }
+    for (size_t k = 0; k < 12; ++k) {
+      const double value = structure.placements[i * 12 + k];
+      if (!std::isfinite(value)) {
+        return "instance " + std::to_string(i) + " has a placement value at " +
+               std::to_string(k) + " that is not a finite number";
+      }
+    }
+  }
+
+  for (size_t i = 0; i < structure.parts.size(); ++i) {
+    const StepPart& part = structure.parts[i];
+    if (part.colouredFaceCount == 0) continue;
+    const size_t end = static_cast<size_t>(part.faceColourStart) + part.faceCount;
+    if (end > structure.faceColours.size()) {
+      return "part " + std::to_string(i) + " claims " + std::to_string(part.faceCount) +
+             " face colours from offset " + std::to_string(part.faceColourStart) +
+             ", past the end of a list of " +
+             std::to_string(structure.faceColours.size());
+    }
+  }
+  return {};
+}
+
+// Rebuilds a gp_Trsf from 12 row-major doubles.
+TopLoc_Location placementAt(const std::vector<double>& placements, size_t index) {
+  const double* v = placements.data() + index * 12;
+  gp_Trsf transform;
+  transform.SetValues(v[0], v[1], v[2], v[3],
+                      v[4], v[5], v[6], v[7],
+                      v[8], v[9], v[10], v[11]);
+  return TopLoc_Location(transform);
+}
+
+// Reads a colour back out of the plain triple it crossed as.
+Quantity_Color colourFrom(double r, double g, double b) {
+  Quantity_Color colour;
+  // sRGB in, sRGB out. Symmetric with the read side, and the writer encodes as
+  // sRGB again - so a colour that made the round trip is the number the file
+  // first said, not that number pushed through two conversions.
+  colour.SetValues(r, g, b, Quantity_TOC_sRGB);
+  return colour;
+}
+
+// Attaches a name to a label, if there is one.
+void setLabelName(const TDF_Label& label, const std::string& name) {
+  if (name.empty()) return;
+  // The trailing true is isMultiByte: names are carried as UTF-8 and a file
+  // from outside an English-speaking toolchain will have some.
+  TDataStd_Name::Set(label, TCollection_ExtendedString(name.c_str(), true));
+}
+
 // Reads the staged payload as shapes alone, the way MVP-2 did.
 //
 // Kept as its own function rather than as a branch inside the structured path.
@@ -1632,13 +1738,300 @@ StepImportResult importStep(const StepTranslationOptions& options) {
   });
 }
 
+namespace {
+
+// Writes the bodies flat, as MVP-2 did, with one thing corrected.
+//
+// The correction is the assembly mode. MVP-2 left it to the library, and
+// OCCT's default is Auto: any compound of more than one shape becomes a
+// fabricated root product with one invented child per body, carrying names
+// like "Open CASCADE STEP translator 8.0 2.1". That contradicted the scenario
+// MVP-2 shipped and no test caught it, because the round trips asserted
+// geometry rather than the entity census. Off is stated here, so a flat
+// session writes flat products and the file says what the session held.
+//
+// Set through the writer's own parameters rather than Interface_Static, which
+// is process-global: a mode set there would outlive the call and silently
+// apply to whatever ran next.
+StepExportResult exportStepFlat(const std::vector<TopoDS_Shape>& shapes,
+                                const StepTranslationOptions& options) {
+  StepExportResult out;
+  out.assemblyMode = "off";
+
+  BRep_Builder builder;
+  TopoDS_Compound compound;
+  builder.MakeCompound(compound);
+  for (const TopoDS_Shape& shape : shapes) {
+    builder.Add(compound, shape);
+  }
+
+  STEPControl_Writer writer;
+  if (!options.shapeProcessing) {
+    writer.SetShapeProcessFlags(ShapeProcess::OperationsFlags{});
+  } else {
+    out.shapeProcessing = kWriterDefaultProcessing;
+  }
+
+  // Seeded from the statics so every other setting stays exactly what it was,
+  // then the one thing this stage is deciding is overridden.
+  DESTEP_Parameters params;
+  params.InitFromStatic();
+  params.WriteAssembly = DESTEP_Parameters::WriteMode_Assembly_Off;
+
+  // AsIs writes each shape as the STEP entity that matches what it already is,
+  // rather than forcing everything to a faceted or shell-based form. Anything
+  // else would discard exact geometry on the way out, which is the one thing
+  // an export here must not do.
+  const IFSelect_ReturnStatus transferStatus =
+      writer.Transfer(compound, STEPControl_AsIs, params);
+  if (transferStatus != IFSelect_RetDone) {
+    return fail<StepExportResult>(
+        Status::TranslationFailed,
+        "bodies could not be transferred to STEP (status " +
+            std::to_string(static_cast<int>(transferStatus)) + ")");
+  }
+
+  std::ostringstream stream(std::ios::out | std::ios::binary);
+  const IFSelect_ReturnStatus writeStatus = writer.WriteStream(stream);
+  if (writeStatus != IFSelect_RetDone) {
+    return fail<StepExportResult>(
+        Status::TranslationFailed,
+        "STEP payload could not be written (status " +
+            std::to_string(static_cast<int>(writeStatus)) + ")");
+  }
+
+  g_staging = stream.str();
+
+  const occ::handle<StepData_StepModel> stepModel = writer.Model();
+  out.unitWritten = stepModel.IsNull()
+                        ? std::string()
+                        : lengthUnitName(stepModel->WriteLengthUnit());
+  out.dataPtr = reinterpret_cast<uint32_t>(g_staging.data());
+  out.byteLength = static_cast<uint32_t>(g_staging.size());
+  out.bodyCount = static_cast<uint32_t>(shapes.size());
+  return out;
+}
+
+// Writes the bodies as parts placed by a tree, through a scratch document.
+//
+// The document is built here and discarded before the call returns, exactly as
+// on the read side - which is the cost of not keeping a second document of
+// record, and is paid deliberately.
+StepExportResult exportStepStructured(const std::vector<TopoDS_Shape>& shapes,
+                                      const StepStructure& structure,
+                                      const StepTranslationOptions& options) {
+  StepExportResult out;
+  out.assemblyMode = "document";
+  out.wroteStructure = true;
+
+  ScratchDocument scratch;
+  if (scratch.isNull()) {
+    return fail<StepExportResult>(Status::KernelOperationFailed,
+                                  "an XCAF document could not be created");
+  }
+
+  const occ::handle<XCAFDoc_ShapeTool> shapeTool =
+      XCAFDoc_DocumentTool::ShapeTool(scratch.get()->Main());
+  const occ::handle<XCAFDoc_ColorTool> colourTool =
+      XCAFDoc_DocumentTool::ColorTool(scratch.get()->Main());
+  if (shapeTool.IsNull() || colourTool.IsNull()) {
+    return fail<StepExportResult>(Status::KernelOperationFailed,
+                                  "the scratch document has no shape or colour tool");
+  }
+
+  // --- Parts, one label each -----------------------------------------------
+  std::vector<TDF_Label> partLabels(shapes.size());
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    // makeAssembly false: a part that happens to be a compound is one part,
+    // because the caller said so. Letting XCAF expand it here would invent
+    // structure the session does not have, which is the same fabrication this
+    // stage is removing from the flat path.
+    const TDF_Label label = shapeTool->AddShape(shapes[i], false);
+    if (label.IsNull()) {
+      return fail<StepExportResult>(
+          Status::KernelOperationFailed,
+          "body " + std::to_string(i) + " could not be added to the document");
+    }
+    partLabels[i] = label;
+
+    const StepPart& part = structure.parts[i];
+    if (!part.name.empty()) {
+      setLabelName(label, part.name);
+      ++out.namedPartCount;
+    }
+    if (part.hasColour) {
+      colourTool->SetColor(label,
+                           colourFrom(part.colourR, part.colourG, part.colourB),
+                           XCAFDoc_ColorSurf);
+      ++out.colouredPartCount;
+    }
+
+    // Face colours, in the same exploration order they were read in. Nothing
+    // else could pair them: the position IS the key, and it is the only key.
+    if (part.colouredFaceCount == 0) continue;
+    size_t face = 0;
+    for (TopExp_Explorer exp(shapes[i], TopAbs_FACE); exp.More(); exp.Next(), ++face) {
+      if (face >= part.faceCount) break;
+      const StepFaceColour& entry =
+          structure.faceColours[static_cast<size_t>(part.faceColourStart) + face];
+      if (!entry.has) continue;
+      colourTool->SetColor(exp.Current(), colourFrom(entry.r, entry.g, entry.b),
+                           XCAFDoc_ColorSurf);
+      ++out.colouredFaceCount;
+    }
+  }
+
+  // --- The tree -------------------------------------------------------------
+  //
+  // Two labels per node, and the difference matters. The DEFINITION is what the
+  // node refers to - a part, or a fresh assembly label for a grouping node -
+  // and is where children attach. The OCCURRENCE is the component label the
+  // parent holds, and is where an occurrence's own name and colour go. Collapse
+  // them and an occurrence's name overwrites its part's.
+  struct BuiltNode {
+    TDF_Label definition;
+    TDF_Label occurrence;
+  };
+  std::vector<BuiltNode> built(structure.instances.size());
+
+  for (size_t i = 0; i < structure.instances.size(); ++i) {
+    const StepInstance& node = structure.instances[i];
+    const TopLoc_Location location = placementAt(structure.placements, i);
+
+    TDF_Label definition;
+    if (node.part >= 0) {
+      definition = partLabels[static_cast<size_t>(node.part)];
+    } else {
+      definition = shapeTool->NewShape();
+      ++out.groupingNodeCount;
+    }
+
+    if (node.parent < 0) {
+      if (node.part >= 0 && !location.IsIdentity()) {
+        // A free shape carries no location, so a transform at the root needs a
+        // node to live on. Counted, because inventing one is exactly what this
+        // path is otherwise removing.
+        const TDF_Label wrapper = shapeTool->NewShape();
+        const TDF_Label component = shapeTool->AddComponent(wrapper, definition, location);
+        built[i] = {wrapper, component};
+        ++out.fabricatedNodeCount;
+      } else {
+        built[i] = {definition, definition};
+      }
+    } else {
+      const TDF_Label parentDefinition =
+          built[static_cast<size_t>(node.parent)].definition;
+      const TDF_Label component =
+          shapeTool->AddComponent(parentDefinition, definition, location);
+      if (component.IsNull()) {
+        return fail<StepExportResult>(
+            Status::KernelOperationFailed,
+            "instance " + std::to_string(i) + " could not be attached to its parent");
+      }
+      built[i] = {definition, component};
+    }
+
+    if (!node.name.empty()) {
+      if (!built[i].occurrence.IsEqual(built[i].definition)) {
+        setLabelName(built[i].occurrence, node.name);
+        ++out.namedInstanceCount;
+      } else if (node.part < 0) {
+        // A root grouping node has no part behind it, so its own label is the
+        // only place its name can go - and if it does not go there OCCT
+        // invents one, which is how "carrier" came back as "Open CASCADE STEP
+        // translator 8.0 1" the first time this ran. The count is not enough
+        // to catch that: four names went out and four came back, one of them
+        // fabricated.
+        setLabelName(built[i].definition, node.name);
+        ++out.namedInstanceCount;
+      }
+      // The remaining case is a root that places a part under the identity,
+      // where the occurrence IS the part label. The part's name is already on
+      // it and wins; an import of such a node reads the same label for both,
+      // so the two names cannot disagree in anything this system produced.
+    }
+  }
+
+  shapeTool->UpdateAssemblies();
+
+  // Occurrence colours, after UpdateAssemblies because SetInstanceColor keys on
+  // the located shape and that is what UpdateAssemblies settles.
+  //
+  // Through SetInstanceColor rather than onto the component label, because a
+  // per-occurrence colour lives in a SHUO - which is what the read side found
+  // and what nothing in this project could confirm until there was a writer to
+  // produce one.
+  for (size_t i = 0; i < structure.instances.size(); ++i) {
+    const StepInstance& node = structure.instances[i];
+    if (!node.hasColour) continue;
+    if (built[i].occurrence.IsEqual(built[i].definition)) continue;
+    const TopoDS_Shape located = XCAFDoc_ShapeTool::GetShape(built[i].occurrence);
+    if (located.IsNull()) continue;
+    if (colourTool->SetInstanceColor(
+            located, XCAFDoc_ColorSurf,
+            colourFrom(node.colourR, node.colourG, node.colourB))) {
+      ++out.colouredInstanceCount;
+    }
+  }
+
+  STEPCAFControl_Writer writer;
+  writer.SetNameMode(true);
+  writer.SetColorMode(true);
+  writer.SetSHUOMode(true);
+  writer.SetLayerMode(false);
+  writer.SetPropsMode(false);
+
+  if (!options.shapeProcessing) {
+    writer.ChangeWriter().SetShapeProcessFlags(ShapeProcess::OperationsFlags{});
+  } else {
+    out.shapeProcessing = kWriterDefaultProcessing;
+  }
+
+  if (!writer.Transfer(scratch.get(), STEPControl_AsIs)) {
+    return fail<StepExportResult>(Status::TranslationFailed,
+                                  "the structure could not be transferred to STEP");
+  }
+
+  std::ostringstream stream(std::ios::out | std::ios::binary);
+  const IFSelect_ReturnStatus writeStatus = writer.WriteStream(stream);
+  if (writeStatus != IFSelect_RetDone) {
+    return fail<StepExportResult>(
+        Status::TranslationFailed,
+        "STEP payload could not be written (status " +
+            std::to_string(static_cast<int>(writeStatus)) + ")");
+  }
+
+  g_staging = stream.str();
+
+  const occ::handle<StepData_StepModel> stepModel = writer.ChangeWriter().Model();
+  out.unitWritten = stepModel.IsNull()
+                        ? std::string()
+                        : lengthUnitName(stepModel->WriteLengthUnit());
+  out.dataPtr = reinterpret_cast<uint32_t>(g_staging.data());
+  out.byteLength = static_cast<uint32_t>(g_staging.size());
+  out.bodyCount = static_cast<uint32_t>(shapes.size());
+  out.instanceCount = static_cast<uint32_t>(structure.instances.size());
+  return out;
+}
+
+}  // namespace
+
 StepExportResult exportStep(const std::vector<uint32_t>& bodyIds,
+                            const StepStructure& structure,
                             const StepTranslationOptions& options) {
   if (bodyIds.empty()) {
     // Writing an interchange file describing nothing is not a useful outcome to
     // hand a caller, and the application refuses an empty export above this.
     return fail<StepExportResult>(Status::InvalidParameter,
                                   "no bodies to export");
+  }
+
+  // The structure is checked before the handles, because a malformed structure
+  // is a caller bug and an unknown handle is a lifetime bug, and the first is
+  // cheaper to find. Either way nothing has been built yet.
+  const std::string defect = structureDefect(bodyIds, structure);
+  if (!defect.empty()) {
+    return fail<StepExportResult>(Status::InvalidParameter, defect);
   }
 
   // Resolved before a byte is written, as in serializeBodies: a set containing
@@ -1658,54 +2051,12 @@ StepExportResult exportStep(const std::vector<uint32_t>& bodyIds,
   quietOcctChatter();
 
   return guarded<StepExportResult>([&] {
-    StepExportResult out;
-
-    BRep_Builder builder;
-    TopoDS_Compound compound;
-    builder.MakeCompound(compound);
-    for (const TopoDS_Shape& shape : shapes) {
-      builder.Add(compound, shape);
-    }
-
-    STEPControl_Writer writer;
-    if (!options.shapeProcessing) {
-      writer.SetShapeProcessFlags(ShapeProcess::OperationsFlags{});
-    } else {
-      out.shapeProcessing = kWriterDefaultProcessing;
-    }
-
-    // AsIs writes each shape as the STEP entity that matches what it already is,
-    // rather than forcing everything to a faceted or shell-based form. Anything
-    // else would discard exact geometry on the way out, which is the one thing
-    // an export here must not do.
-    const IFSelect_ReturnStatus transferStatus =
-        writer.Transfer(compound, STEPControl_AsIs);
-    if (transferStatus != IFSelect_RetDone) {
-      return fail<StepExportResult>(
-          Status::TranslationFailed,
-          "bodies could not be transferred to STEP (status " +
-              std::to_string(static_cast<int>(transferStatus)) + ")");
-    }
-
-    std::ostringstream stream(std::ios::out | std::ios::binary);
-    const IFSelect_ReturnStatus writeStatus = writer.WriteStream(stream);
-    if (writeStatus != IFSelect_RetDone) {
-      return fail<StepExportResult>(
-          Status::TranslationFailed,
-          "STEP payload could not be written (status " +
-              std::to_string(static_cast<int>(writeStatus)) + ")");
-    }
-
-    g_staging = stream.str();
-
-    const Handle(StepData_StepModel) stepModel = writer.Model();
-    out.unitWritten = stepModel.IsNull()
-                          ? std::string()
-                          : lengthUnitName(stepModel->WriteLengthUnit());
-    out.dataPtr = reinterpret_cast<uint32_t>(g_staging.data());
-    out.byteLength = static_cast<uint32_t>(g_staging.size());
-    out.bodyCount = static_cast<uint32_t>(shapes.size());
-    return out;
+    // Parts alone, with no tree, is still the structured path: a flat file can
+    // carry product names and colours, and the flat writer has nowhere to put
+    // them.
+    const bool flat = structure.instances.empty() && structure.parts.empty();
+    return flat ? exportStepFlat(shapes, options)
+                : exportStepStructured(shapes, structure, options);
   });
 }
 

@@ -94,6 +94,14 @@ export interface RawBodyIdList {
   delete(): void;
 }
 
+/** An embind `std::vector<T>`, with the same ownership rule as the one above. */
+export interface RawVectorOf<T> {
+  push_back(value: T): void;
+  size(): number;
+  get(index: number): T | undefined;
+  delete(): void;
+}
+
 export interface RawKernelStats {
   liveBodyCount: number;
   totalBodiesCreated: number;
@@ -159,6 +167,36 @@ export interface RawStepImportResult {
   payloadByteLength: number;
 }
 
+/**
+ * A structure crossing INTO the kernel, as four embind vectors.
+ *
+ * Deliberately the same four lists an import hands back. Each is backed by WASM
+ * memory and frees nothing implicitly, in this direction as much as the other.
+ */
+export interface RawStepStructure {
+  instances: RawVectorOf<{
+    parent: number;
+    part: number;
+    name: string;
+    hasColour: boolean;
+    colourR: number;
+    colourG: number;
+    colourB: number;
+  }>;
+  placements: RawVectorOf<number>;
+  parts: RawVectorOf<{
+    name: string;
+    hasColour: boolean;
+    colourR: number;
+    colourG: number;
+    colourB: number;
+    faceCount: number;
+    faceColourStart: number;
+    colouredFaceCount: number;
+  }>;
+  faceColours: RawVectorOf<{ has: boolean; r: number; g: number; b: number }>;
+}
+
 export interface RawStepExportResult {
   status: number;
   message: string;
@@ -197,8 +235,16 @@ export interface KernelModule {
   importStep(options: RawStepTranslationOptions): RawStepImportResult;
   exportStep(
     bodyIds: RawBodyIdList,
+    structure: RawStepStructure,
     options: RawStepTranslationOptions,
   ): RawStepExportResult;
+
+  // Constructors for the structure's four lists. Named here so a caller cannot
+  // reach for one that was never registered.
+  readonly StepInstanceList: new () => RawStepStructure['instances'];
+  readonly PlacementList: new () => RawStepStructure['placements'];
+  readonly StepPartList: new () => RawStepStructure['parts'];
+  readonly StepFaceColourList: new () => RawStepStructure['faceColours'];
 
   // IMPORTANT: Emscripten replaces these views whenever linear memory grows.
   // They must be read fresh at every use and never cached - a retained view

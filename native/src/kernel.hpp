@@ -170,7 +170,14 @@ StepImportResult importStep(const StepTranslationOptions& options);
 // As with serializeBodies, every handle is resolved before anything is written,
 // so a set containing an unknown handle fails having produced no payload, and
 // the inputs are neither released nor mutated.
+//
+// The structure is plain data and is optional: an empty instance list writes
+// the bodies flat, and no structure is invented for them. A structure that does
+// not resolve - an instance naming a body outside the set, a parent that does
+// not precede its child, a placement that is not 12 finite numbers - is refused
+// before a byte is written, naming the defect.
 StepExportResult exportStep(const std::vector<uint32_t>& bodyIds,
+                            const StepStructure& structure,
                             const StepTranslationOptions& options);
 
 KernelStats stats();

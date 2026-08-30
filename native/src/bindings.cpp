@@ -173,6 +173,15 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("shapeProcessing", &StepImportResult::shapeProcessing)
       .field("payloadByteLength", &StepImportResult::payloadByteLength);
 
+  // The same records an import returns, handed back. A structure is plain data
+  // in both directions and there is deliberately no second encoding for the way
+  // in - two encodings would be two things to keep in step.
+  value_object<StepStructure>("StepStructure")
+      .field("instances", &StepStructure::instances)
+      .field("placements", &StepStructure::placements)
+      .field("parts", &StepStructure::parts)
+      .field("faceColours", &StepStructure::faceColours);
+
   value_object<StepExportResult>("StepExportResult")
       .field("status", &StepExportResult::status)
       .field("message", &StepExportResult::message)
@@ -180,7 +189,17 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("byteLength", &StepExportResult::byteLength)
       .field("bodyCount", &StepExportResult::bodyCount)
       .field("unitWritten", &StepExportResult::unitWritten)
-      .field("shapeProcessing", &StepExportResult::shapeProcessing);
+      .field("shapeProcessing", &StepExportResult::shapeProcessing)
+      .field("wroteStructure", &StepExportResult::wroteStructure)
+      .field("instanceCount", &StepExportResult::instanceCount)
+      .field("groupingNodeCount", &StepExportResult::groupingNodeCount)
+      .field("fabricatedNodeCount", &StepExportResult::fabricatedNodeCount)
+      .field("namedPartCount", &StepExportResult::namedPartCount)
+      .field("namedInstanceCount", &StepExportResult::namedInstanceCount)
+      .field("colouredPartCount", &StepExportResult::colouredPartCount)
+      .field("colouredInstanceCount", &StepExportResult::colouredInstanceCount)
+      .field("colouredFaceCount", &StepExportResult::colouredFaceCount)
+      .field("assemblyMode", &StepExportResult::assemblyMode);
 
   value_object<KernelStats>("KernelStats")
       .field("liveBodyCount", &KernelStats::liveBodyCount)

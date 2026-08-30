@@ -26,6 +26,7 @@ import type {
   KernelModule,
   KernelModuleFactory,
   RawStepImportResult,
+  RawStepStructure,
 } from '../wasm-module.ts';
 import type {
   KernelEnvelope,
@@ -43,6 +44,22 @@ const BOOLEAN_KIND_CODE: Record<BooleanKind, number> = {
 export interface HandlerOutcome {
   readonly value: unknown;
   readonly transfer: readonly Transferable[];
+}
+
+/**
+ * A structure describing nothing, for a flat export.
+ *
+ * embind value objects need every field present, and every field here is a
+ * heap-backed vector the caller has to free - so this exists to keep the four
+ * allocations in one place, next to the four releases at the call site.
+ */
+function emptyStructure(mod: KernelModule): RawStepStructure {
+  return {
+    instances: new mod.StepInstanceList(),
+    placements: new mod.PlacementList(),
+    parts: new mod.StepPartList(),
+    faceColours: new mod.StepFaceColourList(),
+  };
 }
 
 export class KernelHandler {
@@ -574,13 +591,24 @@ export class KernelHandler {
     let result;
     try {
       for (const id of bodyIds) list.push_back(id);
-      result = this.#timed('exportStep', () =>
-        mod.exportStep(list, {
-          shapeProcessing: options.shapeProcessing ?? false,
-          // As above: required by embind, and the writer ignores it.
-          structure: false,
-        }),
-      );
+      // An empty structure means a flat export, which is what this layer still
+      // asks for. Built and freed beside the call rather than hoisted: all four
+      // lists are heap-backed, and export is the only caller.
+      const structure = emptyStructure(mod);
+      try {
+        result = this.#timed('exportStep', () =>
+          mod.exportStep(list, structure, {
+            shapeProcessing: options.shapeProcessing ?? false,
+            // Required by embind on the way in; the writer does not read it.
+            structure: false,
+          }),
+        );
+      } finally {
+        structure.instances.delete();
+        structure.placements.delete();
+        structure.parts.delete();
+        structure.faceColours.delete();
+      }
     } finally {
       list.delete();
     }

@@ -425,6 +425,31 @@ struct StepImportResult {
   uint32_t payloadByteLength = 0;
 };
 
+// A structure to export, as plain data.
+//
+// Deliberately the same records an import returns: what came out goes back in,
+// with no translation layer between them that could drift. That is also what
+// makes a round trip a real test rather than a test of two encoders agreeing.
+//
+// Nothing here is a handle. The bodies are named by position - instance.part
+// indexes the bodyIds list the caller passes alongside - so a structure can be
+// built, edited, persisted, and handed back by a layer that has never held a
+// shape.
+struct StepStructure {
+  // Empty means a flat export: no tree is written and none is fabricated.
+  std::vector<StepInstance> instances;
+
+  // 12 doubles per instance, row-major 3x4, parent-relative. Composition down
+  // the tree is the caller's, exactly as on the way in.
+  std::vector<double> placements;
+
+  // One per exported body, in the same order.
+  std::vector<StepPart> parts;
+
+  // Concatenated face-colour blocks, addressed through StepPart.
+  std::vector<StepFaceColour> faceColours;
+};
+
 // Result of translating bodies into a STEP payload.
 //
 // As with SerializeResult the bytes are opaque - storable, measurable, and
@@ -447,6 +472,38 @@ struct StepExportResult {
   // As StepImportResult::shapeProcessing. OCCT's writer runs SplitCommonVertex
   // and DirectFaces by default, and both change what the file describes.
   std::string shapeProcessing;
+
+  // Whether a tree was written, and what was in it.
+  bool wroteStructure = false;
+  uint32_t instanceCount = 0;
+  uint32_t groupingNodeCount = 0;
+
+  // Nodes this export had to invent, which should always be zero.
+  //
+  // Exactly one case needs one: a root that places a part under a transform
+  // that is not the identity. A free shape in XCAF carries no location, so the
+  // transform needs a node to live on. Our own import never produces that
+  // shape of tree - its roots are grouping nodes - so a non-zero count here
+  // means a caller built something the format cannot hold directly, and it is
+  // reported rather than done quietly.
+  uint32_t fabricatedNodeCount = 0;
+
+  // What was actually attached, so the export side of a fidelity census does
+  // not have to be inferred from the re-imported file alone.
+  uint32_t namedPartCount = 0;
+  uint32_t namedInstanceCount = 0;
+  uint32_t colouredPartCount = 0;
+  uint32_t colouredInstanceCount = 0;
+  uint32_t colouredFaceCount = 0;
+
+  // The assembly mode this export ran under, named rather than inherited.
+  //
+  // "off" is the flat path, which since MVP-2 had been letting OCCT decide -
+  // and OCCT's default is Auto, which turns any multi-body compound into a
+  // fabricated root product with one invented child per body. "document" is
+  // the CAF path, where the tree in the scratch document is what gets written
+  // and there is nothing for a mode to guess at.
+  std::string assemblyMode;
 };
 
 // Result of restoring bodies from a payload.

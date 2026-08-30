@@ -525,25 +525,24 @@ test('the assembly fixture survives our own round trip', { skip }, async () => {
   assert.equal(back.bodyIds.length, report.bodyIds.length, 'both bodies come back');
   assert.equal(back.styledItemCount, 0, 'our writer emits no colour yet');
 
-  // Structure does not survive, which is this stage's subject. But what happens
-  // instead is worse than nothing and was not known before this fixture existed:
-  // OCCT's writer turns ANY multi-body export into an assembly - a root product
-  // plus one child per body, with generated names like
-  // "Open CASCADE STEP translator 8.0 2.1". One body exports flat; two export as
-  // a fabricated hierarchy.
+  // A flat export writes flat, and getting there took setting a mode.
   //
-  // That directly contradicts the scenario MVP-2 wrote and shipped ("no
-  // fabricated part names, colours, or assembly structure are written",
-  // `openspec/specs/step-translation/spec.md:162`). Nothing caught it because
-  // the round-trip tests asserted geometry rather than the entity census.
+  // This assertion used to read the other way. OCCT's writer defaults to
+  // assembly mode Auto, which turns ANY multi-body export into a fabricated
+  // hierarchy - a root product plus one child per body with generated names
+  // like "Open CASCADE STEP translator 8.0 2.1" - so two bodies came back as
+  // two occurrences of an assembly nobody asked for. That contradicted the
+  // scenario MVP-2 shipped ("no fabricated part names, colours, or assembly
+  // structure are written"), and no test caught it because the round trips
+  // asserted geometry rather than the entity census.
   //
-  // Pinned here rather than deleted, so it fails loudly when the writer's
-  // assembly mode is set explicitly instead of inherited from the library
-  // default. The two occurrences below are the fabrication, not our structure.
+  // The mode is now stated at every export rather than inherited, so a session
+  // with no structure produces a file with no structure. The count below is
+  // zero, and it was two.
   assert.equal(
     back.assemblyNodeCount,
-    report.bodyIds.length,
-    'OCCT fabricates one occurrence per exported body - see the comment above',
+    0,
+    'a flat export must fabricate no assembly - the writer\'s mode is set, not inherited',
   );
 
   for (const [i, bodyId] of back.bodyIds.entries()) {
