@@ -79,6 +79,8 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("positionsPtr", &MeshResult::positionsPtr)
       .field("normalsPtr", &MeshResult::normalsPtr)
       .field("indicesPtr", &MeshResult::indicesPtr)
+      .field("faceRangesPtr", &MeshResult::faceRangesPtr)
+      .field("faceRangeCount", &MeshResult::faceRangeCount)
       .field("linearDeflection", &MeshResult::linearDeflection)
       .field("angularDeflection", &MeshResult::angularDeflection)
       .field("fromCache", &MeshResult::fromCache);
@@ -111,7 +113,29 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
   value_object<StepInstance>("StepInstance")
       .field("parent", &StepInstance::parent)
       .field("part", &StepInstance::part)
-      .field("name", &StepInstance::name);
+      .field("name", &StepInstance::name)
+      .field("hasColour", &StepInstance::hasColour)
+      .field("colourR", &StepInstance::colourR)
+      .field("colourG", &StepInstance::colourG)
+      .field("colourB", &StepInstance::colourB);
+
+  // A colour crosses as three numbers and a flag - never as a handle to a
+  // colour, a style, or the entity that carried it.
+  value_object<StepFaceColour>("StepFaceColour")
+      .field("has", &StepFaceColour::has)
+      .field("r", &StepFaceColour::r)
+      .field("g", &StepFaceColour::g)
+      .field("b", &StepFaceColour::b);
+
+  value_object<StepPart>("StepPart")
+      .field("name", &StepPart::name)
+      .field("hasColour", &StepPart::hasColour)
+      .field("colourR", &StepPart::colourR)
+      .field("colourG", &StepPart::colourG)
+      .field("colourB", &StepPart::colourB)
+      .field("faceCount", &StepPart::faceCount)
+      .field("faceColourStart", &StepPart::faceColourStart)
+      .field("colouredFaceCount", &StepPart::colouredFaceCount);
 
   value_object<StepImportResult>("StepImportResult")
       .field("status", &StepImportResult::status)
@@ -136,11 +160,15 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
       .field("structurePresent", &StepImportResult::structurePresent)
       .field("instances", &StepImportResult::instances)
       .field("placements", &StepImportResult::placements)
-      .field("partNames", &StepImportResult::partNames)
+      .field("parts", &StepImportResult::parts)
+      .field("faceColours", &StepImportResult::faceColours)
       .field("treeDepth", &StepImportResult::treeDepth)
       .field("groupingNodeCount", &StepImportResult::groupingNodeCount)
       .field("namedInstanceCount", &StepImportResult::namedInstanceCount)
       .field("namedPartCount", &StepImportResult::namedPartCount)
+      .field("colouredPartCount", &StepImportResult::colouredPartCount)
+      .field("colouredInstanceCount", &StepImportResult::colouredInstanceCount)
+      .field("colouredFaceCount", &StepImportResult::colouredFaceCount)
       .field("unresolvedInstanceCount", &StepImportResult::unresolvedInstanceCount)
       .field("shapeProcessing", &StepImportResult::shapeProcessing)
       .field("payloadByteLength", &StepImportResult::payloadByteLength);
@@ -214,7 +242,8 @@ EMSCRIPTEN_BINDINGS(webcad_kernel) {
   // anything the kernel still holds.
   register_vector<StepInstance>("StepInstanceList");
   register_vector<double>("PlacementList");
-  register_vector<std::string>("NameList");
+  register_vector<StepPart>("StepPartList");
+  register_vector<StepFaceColour>("StepFaceColourList");
 
   // --- Operations ----------------------------------------------------------
 

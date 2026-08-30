@@ -370,6 +370,17 @@ structure is lost — worth stating, not worth engineering around at this stage.
   and structure survive a round trip through a third-party reader?
 - Is there a STEP assembly with colours, under a licence that permits pinning it,
   small enough to fetch in CI? If not, the interop claim is reported unexercised.
-- Does XCAF's reader expose the difference between a part's own colour and a
-  component's override, or resolve it before we see it? The colour resolution
-  order above assumes the former.
+- ~~Does XCAF's reader expose the difference between a part's own colour and a
+  component's override, or resolve it before we see it?~~ **Answered: both**
+  (task 5.1). The two are stored apart - a part's colour on its label, an
+  occurrence's in a SHUO - but OCCT's public accessor for the second,
+  `GetInstanceColor`, resolves: finding no override it falls back to the
+  component label and then to the part's own colour, so it reports every
+  occurrence of a coloured part as overridden. Measured, and it erased the
+  distinction on the fixture. The kernel reads the SHUO directly instead. What
+  remains open is narrower and is tracked as task 5.1a: whether a genuine
+  override round-trips at all, which group 6 can settle with OCCT's own writer.
+- Does a STEP colour survive as the number the file wrote? **Yes, if it is read
+  as sRGB** (task 5.1). OCCT decodes `COLOUR_RGB` as sRGB and stores it linear,
+  so the component accessors return a different colour than the file declared.
+  Not an open question any more, but it was not a known one either.

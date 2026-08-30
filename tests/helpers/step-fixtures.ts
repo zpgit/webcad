@@ -153,18 +153,56 @@ export const ASSEMBLY_FIXTURE = {
   },
 
   /**
-   * Colours in the file, as RGB in 0..1.
+   * Colours in the file, as sRGB in 0..1.
    *
-   * `face` is on the second `ADVANCED_FACE` of the part's closed shell. Which
-   * exploration index that lands on is deliberately NOT asserted here: it is a
-   * property of OCCT's traversal, not of the file, and stating it as an
-   * expectation would bake an assumption into the fixture. A test that reads
-   * face colours should report the index it found.
+   * sRGB is now stated rather than implied, because the two readings differ and
+   * one of them is wrong. OCCT decodes a STEP `COLOUR_RGB` as sRGB and stores
+   * it converted to linear, so `Quantity_Color::Red()` hands back 0.0331 where
+   * the file said 0.2. These are the file's numbers, and the kernel converts
+   * back on the way out to return them.
+   *
+   * `face` is on the second `ADVANCED_FACE` of the part's closed shell.
    */
   colours: {
     part: [0.2, 0.4, 0.8],
     face: [0.9, 0.6, 0.1],
   },
+
+  /**
+   * Where the coloured face lands in exploration order: index 1 of 6.
+   *
+   * An observation about OCCT's traversal, not a property of the file, and
+   * separated from `colours` above for that reason. Recorded rather than left
+   * unstated because a per-face colour is keyed positionally, so this index is
+   * the one number a face-colour test has to agree with - and because a change
+   * in it between OCCT versions is exactly the silent breakage the positional
+   * key risks. Task 1.2 established that the order survives a checkpoint; this
+   * pins where in that order the colour sits.
+   */
+  readerFaceColourIndex: 1,
+
+  /**
+   * An occurrence-level colour override is still NOT in this file.
+   *
+   * Task 2.1a deferred it to group 5 "against a reader that can verify it".
+   * There is now such a reader, and it still cannot verify one, so authoring
+   * the entities would repeat the mistake 2.1a avoided.
+   *
+   * What was learned trying. AP214 expresses the override as a
+   * `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM`, which OCCT routes into a SHUO
+   * rather than onto the component's label. A hand-authored one parses - the
+   * entity census counts it - and produces no instance colour, and from outside
+   * the library there is no way to tell whether the authoring or the reader is
+   * at fault. No file available to this project settles it either: a grep for
+   * `OVER_RIDING` across every local STEP fixture, including all four published
+   * variants of AS1, finds nothing.
+   *
+   * So it waits for group 6, where `STEPCAFControl_Writer` can write a document
+   * with an instance colour set and re-importing our own export answers the
+   * question outright. If OCCT's own writer and reader cannot round-trip one
+   * between them, that is worth more than a hand-authoring guess.
+   */
+  hasOccurrenceColourOverride: false,
 
   /**
    * Where the two occurrences land in world space, as a bounding box.

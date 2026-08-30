@@ -17,6 +17,8 @@ struct CachedMesh {
   std::vector<float> positions;
   std::vector<float> normals;
   std::vector<uint32_t> indices;
+  // (indexOffset, indexCount) per face visited, in TopExp_Explorer order.
+  std::vector<uint32_t> faceRanges;
   uint32_t vertexCount = 0;
   uint32_t triangleCount = 0;
   double linearDeflection = 0.0;
@@ -25,7 +27,8 @@ struct CachedMesh {
   size_t byteSize() const {
     return positions.size() * sizeof(float)
          + normals.size() * sizeof(float)
-         + indices.size() * sizeof(uint32_t);
+         + indices.size() * sizeof(uint32_t)
+         + faceRanges.size() * sizeof(uint32_t);
   }
 };
 

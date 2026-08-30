@@ -123,6 +123,23 @@ struct MeshResult {
   uint32_t normalsPtr = 0;    // float32 x 3 x vertexCount
   uint32_t indicesPtr = 0;    // uint32  x 3 x triangleCount
 
+  // Which slice of the index buffer each face contributed: uint32 pairs of
+  // (indexOffset, indexCount), one pair per face in TopExp_Explorer order.
+  //
+  // This is how a per-face attribute reaches the renderer without a face ever
+  // being named. The ranges tile the index buffer exactly - no gap, no overlap,
+  // verified rather than intended - so a colour list in the same order can be
+  // applied by walking the two together. Nothing here is a face identity: an
+  // offset into a buffer is meaningless the moment the buffer is regenerated,
+  // which is precisely the property that keeps it from becoming a reference.
+  uint32_t faceRangesPtr = 0;  // uint32 x 2 x faceRangeCount
+
+  // Faces the mesher VISITED, which is not always the number that emitted
+  // geometry: a face whose triangulation is absent still gets a range, with a
+  // count of zero. Counting only the productive faces would shift every later
+  // face's position by one and silently mis-key every attribute after it.
+  uint32_t faceRangeCount = 0;
+
   // The tolerance actually applied, so a caller that omitted one can see the
   // default that was used.
   double linearDeflection = 0.0;
@@ -191,6 +208,15 @@ struct StepInstance {
   // flatten away.
   int32_t part = -1;
 
+  // The colour the file gave THIS occurrence, as sRGB in 0..1.
+  //
+  // Set only for a genuine component reference. At a root the occurrence and
+  // the part are the same label, so reading a colour there would report the
+  // part's own colour as an occurrence override and destroy the distinction
+  // this field exists to keep.
+  bool hasColour = false;
+  double colourR = 0.0, colourG = 0.0, colourB = 0.0;
+
   // The name the file gave THIS occurrence, empty when it gave none.
   //
   // Deliberately not defaulted to the part's name. The two are different facts,
@@ -199,6 +225,65 @@ struct StepInstance {
   // before anyone could see it. Foreign text: any bytes the file contained,
   // carried as UTF-8, never matched against and never used as an identity.
   std::string name;
+};
+
+// One face's colour, or the absence of one.
+//
+// A flag rather than a sentinel because black is a colour a file can mean, and
+// every encoding that reserves a value for "none" eventually meets a file that
+// uses it.
+struct StepFaceColour {
+  bool has = false;
+  double r = 0.0, g = 0.0, b = 0.0;
+};
+
+// One registered body, and what the file said about it.
+//
+// Parallel to the body list: part i is firstBodyId + i. Holds the name and the
+// colour together rather than in two more parallel arrays, which also puts the
+// face-colour block's offset next to the count that validates it.
+struct StepPart {
+  // Empty when the file named nothing. Distinct from an occurrence's name; see
+  // StepInstance::name.
+  std::string name;
+
+  // The part's own colour, as sRGB in 0..1.
+  //
+  // sRGB is not incidental. OCCT decodes a STEP COLOUR_RGB as sRGB and stores
+  // it internally as linear, so reading Quantity_Color::Red() would hand back
+  // 0.033 for a file that said 0.2. These are converted back on the way out,
+  // which is both what the file meant and what a renderer treating colours as
+  // sRGB expects.
+  bool hasColour = false;
+  double colourR = 0.0, colourG = 0.0, colourB = 0.0;
+
+  // Faces in TopExp_Explorer(TopAbs_FACE) order - the same order the mesher
+  // walks, and the checksum for the face-colour block below.
+  //
+  // A checksum, not a proof. It catches the ordinary case where an edit
+  // changes how many faces a body has, and it cannot catch an edit that
+  // rearranges topology while leaving the count alone. The real guarantee is
+  // structural: bodies are immutable here, every operation mints a new handle,
+  // and a new handle has no map to carry forward. This is the backstop for a
+  // caller that tries to carry one across anyway.
+  //
+  // This is a VISIT count, so it can exceed the number of distinct faces
+  // BodyInfo reports where a face is reachable from more than one parent. The
+  // mesher counts the same way, which is what makes the two orders the same
+  // order.
+  uint32_t faceCount = 0;
+
+  // Where this part's dense face-colour block starts in the result's
+  // faceColours list, and how many of its entries carry a colour.
+  //
+  // The block is dense - one entry per face, in exploration order, so the
+  // position IS the key - but it exists at all only when colouredFaceCount is
+  // positive. Most parts in most files have no face colour, and emitting a
+  // thousand empty entries for each of them would cost more than the colours
+  // do. When colouredFaceCount is zero there is no block and faceColourStart
+  // means nothing.
+  uint32_t faceColourStart = 0;
+  uint32_t colouredFaceCount = 0;
 };
 
 // Result of translating a STEP payload into bodies.
@@ -295,10 +380,12 @@ struct StepImportResult {
   // the only layer that knows the tree after this call returns.
   std::vector<double> placements;
 
-  // One per registered body, in body order, empty where the file named nothing.
-  // A part's name and an occurrence's name are different facts and are kept
-  // apart; see StepInstance::name.
-  std::vector<std::string> partNames;
+  // One per registered body, in body order.
+  std::vector<StepPart> parts;
+
+  // Every part's face-colour block, concatenated. A part addresses its own
+  // block through faceColourStart and faceCount; nothing else indexes this.
+  std::vector<StepFaceColour> faceColours;
 
   // Deepest path in the tree, roots counting as 1. Zero when there is no tree.
   uint32_t treeDepth = 0;
@@ -311,6 +398,15 @@ struct StepImportResult {
   // Names that survived, against namedProductCount above.
   uint32_t namedInstanceCount = 0;
   uint32_t namedPartCount = 0;
+
+  // Colours that survived, against styledItemCount above. Kept as three
+  // numbers rather than one because part, occurrence, and face colour come
+  // from three different places in a STEP file and are lost independently -
+  // a file whose per-face colours all arrived and whose overrides all
+  // vanished is a specific finding, not a general one.
+  uint32_t colouredPartCount = 0;
+  uint32_t colouredInstanceCount = 0;
+  uint32_t colouredFaceCount = 0;
 
   // Components whose referred label could not be resolved to anything.
   //

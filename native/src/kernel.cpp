@@ -31,8 +31,10 @@
 #include <Message.hxx>
 #include <Message_Messenger.hxx>
 #include <Message_Printer.hxx>
+#include <NCollection_DataMap.hxx>
 #include <NCollection_Sequence.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Quantity_Color.hxx>
 #include <STEPCAFControl_Reader.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_StepModelType.hxx>
@@ -59,6 +61,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
@@ -71,6 +74,9 @@
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 #include <XCAFApp_Application.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_ColorType.hxx>
+#include <XCAFDoc_GraphNode.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
@@ -314,6 +320,147 @@ std::string labelName(const TDF_Label& label) {
   return std::string(buffer.data());
 }
 
+// A shape-to-colour map, for reading subshape colours in one pass.
+using ColourByShape =
+    NCollection_DataMap<TopoDS_Shape, Quantity_Color, TopTools_ShapeMapHasher>;
+
+// A label's own colour, if it has one.
+//
+// Surface first, then the generic assignment. XCAF splits a shape's colour
+// across three types - surface, curve, generic - and only the first two are
+// about a solid's appearance; curve colour describes wireframe presentation
+// this system does not render. Generic is the fallback a writer uses when it
+// does not distinguish, so it is consulted second rather than ignored.
+bool labelColour(const TDF_Label& label, Quantity_Color& out) {
+  if (XCAFDoc_ColorTool::GetColor(label, XCAFDoc_ColorSurf, out)) return true;
+  if (XCAFDoc_ColorTool::GetColor(label, XCAFDoc_ColorGen, out)) return true;
+  return false;
+}
+
+// An occurrence's OWN colour, if the file gave it one.
+//
+// Deliberately not XCAFDoc_ColorTool::GetInstanceColor, which is a RESOLVING
+// accessor: where it finds no override it falls back to the component label,
+// and then to the referenced part's own colour. That answers "what should this
+// occurrence display as", which is a question the document layer asks later
+// and with its own resolution order. Asked here it reports every occurrence of
+// a coloured part as carrying an override - measured, not feared: both
+// occurrences of the blue bracket came back blue, and the distinction the two
+// colour fields exist to preserve was gone.
+//
+// So this is the first half of GetInstanceColor without the fallbacks: find
+// the component's label chain, find the SHUO hung off it, and read the colour
+// from the SHUO's own label. Absent means absent.
+bool occurrenceOverride(const occ::handle<XCAFDoc_ColorTool>& colourTool,
+                        const TDF_Label& occurrence,
+                        Quantity_Color& out) {
+  if (colourTool.IsNull()) return false;
+  const occ::handle<XCAFDoc_ShapeTool> shapeTool = colourTool->ShapeTool();
+  if (shapeTool.IsNull()) return false;
+
+  const TopoDS_Shape located = XCAFDoc_ShapeTool::GetShape(occurrence);
+  if (located.IsNull()) return false;
+
+  NCollection_Sequence<TDF_Label> chain;
+  if (!shapeTool->FindComponent(located, chain)) return false;
+
+  // Walk up the usage chain: an override can be attached at any level above
+  // the component, and the deepest one wins. Same traversal OCCT's own
+  // accessor makes, stopping where it would start guessing.
+  while (chain.Length() > 1) {
+    occ::handle<XCAFDoc_GraphNode> shuo;
+    if (XCAFDoc_ShapeTool::FindSHUO(chain, shuo) && !shuo.IsNull()) {
+      if (labelColour(shuo->Label(), out)) return true;
+    }
+    chain.Remove(chain.Length());
+  }
+  return false;
+}
+
+// Writes a colour out as sRGB in 0..1.
+//
+// Not Red()/Green()/Blue(), which return OCCT's internal LINEAR components. A
+// STEP COLOUR_RGB is decoded as sRGB (STEPConstruct_Styles::DecodeColor) and
+// stored converted, so a file saying 0.2 comes back as 0.033 through the
+// component accessors. Everything downstream - the document, the renderer, and
+// a re-export, which encodes as sRGB again - wants the number the file meant.
+void writeColour(const Quantity_Color& colour, double& r, double& g, double& b) {
+  colour.Values(r, g, b, Quantity_TOC_sRGB);
+}
+
+// Every coloured subshape of a part, gathered once.
+//
+// One pass over the part's subshape labels rather than a lookup per face: the
+// shape-keyed overload of GetColor searches for a label each time it is called,
+// which turns reading a thousand faces into a thousand searches.
+ColourByShape subShapeColours(const TDF_Label& definition) {
+  ColourByShape out;
+  NCollection_Sequence<TDF_Label> subLabels;
+  XCAFDoc_ShapeTool::GetSubShapes(definition, subLabels);
+  for (int i = 1; i <= subLabels.Length(); ++i) {
+    const TDF_Label sub = subLabels.Value(i);
+    Quantity_Color colour;
+    if (!labelColour(sub, colour)) continue;
+    const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(sub);
+    if (shape.IsNull()) continue;
+    out.Bind(shape, colour);
+  }
+  return out;
+}
+
+// Fills in a part's name, colour, face count, and face-colour block.
+//
+// The face walk uses the same TopExp_Explorer call the mesher uses, on the same
+// registered shape, which is what makes "the Nth colour belongs to the Nth
+// range" true rather than hoped for. Task 1.2 measured that this order survives
+// a checkpoint; this is the other half of the pairing.
+void readPartAppearance(const TDF_Label& definition,
+                        const TopoDS_Shape& shape,
+                        StepPart& part,
+                        std::vector<StepFaceColour>& faceColours) {
+  const ColourByShape subColours = subShapeColours(definition);
+
+  // A shape-level colour comes from the label when the label IS this shape,
+  // and from the subshape map when the shape is one leaf of a compound the
+  // label named. Both routes exist in real files and neither is the odd one.
+  Quantity_Color colour;
+  bool has = false;
+  if (XCAFDoc_ShapeTool::GetShape(definition).IsSame(shape)) {
+    has = labelColour(definition, colour);
+  }
+  if (!has && subColours.IsBound(shape)) {
+    colour = subColours.Find(shape);
+    has = true;
+  }
+  if (has) {
+    part.hasColour = true;
+    writeColour(colour, part.colourR, part.colourG, part.colourB);
+  }
+
+  // Counted in one pass, and the block is only emitted if the pass found
+  // something - so a part with no face colour costs nothing beyond its count.
+  std::vector<StepFaceColour> block;
+  uint32_t faces = 0;
+  uint32_t coloured = 0;
+  for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+    ++faces;
+    StepFaceColour entry;
+    if (subColours.IsBound(exp.Current())) {
+      entry.has = true;
+      writeColour(subColours.Find(exp.Current()), entry.r, entry.g, entry.b);
+      ++coloured;
+    }
+    block.push_back(entry);
+  }
+
+  part.faceCount = faces;
+  part.colouredFaceCount = coloured;
+  if (coloured > 0) {
+    part.faceColourStart = static_cast<uint32_t>(faceColours.size());
+    faceColours.insert(faceColours.end(), block.begin(), block.end());
+  }
+}
+
 // Appends a location as 12 doubles, row-major 3x4.
 //
 // gp_Trsf is exactly a 3x4 affine with a scale folded in, so these twelve carry
@@ -332,6 +479,11 @@ void appendPlacement(const TopLoc_Location& location, std::vector<double>& out) 
 // State for one structured walk.
 struct StructureWalk {
   StepImportResult* out = nullptr;
+
+  // Held because an occurrence override is not reachable from a label: see
+  // walkOccurrence. The part-level and face-level reads need no tool at all,
+  // which is why this is the only member that is one.
+  occ::handle<XCAFDoc_ColorTool> colourTool;
 
   // Part shapes in first-encounter order. This order IS the body order, and
   // therefore the meaning of StepInstance::part.
@@ -371,7 +523,12 @@ int32_t partIndexFor(StructureWalk& walk, const TDF_Label& definition) {
 
   const int32_t index = static_cast<int32_t>(walk.partShapes.size());
   walk.partShapes.push_back(shape);
-  walk.out->partNames.push_back(labelName(definition));
+
+  StepPart part;
+  part.name = labelName(definition);
+  readPartAppearance(definition, shape, part, walk.out->faceColours);
+  walk.out->parts.push_back(std::move(part));
+
   walk.partIndexByEntry.emplace(entry, index);
   return index;
 }
@@ -409,6 +566,27 @@ void walkOccurrence(StructureWalk& walk,
   StepInstance node;
   node.parent = parent;
   node.name = labelName(occurrence);
+
+  // Only a genuine component reference can carry an occurrence colour. At a
+  // root the occurrence and the definition are the same label, so reading one
+  // there would report the PART's colour as an override and destroy exactly
+  // the distinction the two fields exist to keep.
+  if (!occurrence.IsEqual(definition)) {
+    Quantity_Color colour;
+    bool found = labelColour(occurrence, colour);
+
+    // An override does not live on the component label. AP214's
+    // CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM is routed through
+    // SetAssemblyComponentStyle into a SHUO, so the label read above finds
+    // nothing and the SHUO has to be asked directly.
+    if (!found) found = occurrenceOverride(walk.colourTool, occurrence, colour);
+
+    if (found) {
+      node.hasColour = true;
+      writeColour(colour, node.colourR, node.colourG, node.colourB);
+    }
+  }
+
   out.instances.push_back(std::move(node));
 
   // Appended in lockstep with the instance, which is what makes "12 doubles at
@@ -794,6 +972,8 @@ MeshResult tessellate(uint32_t bodyId, const TessellationParams& p) {
     out.positionsPtr = reinterpret_cast<uint32_t>(hit->positions.data());
     out.normalsPtr = reinterpret_cast<uint32_t>(hit->normals.data());
     out.indicesPtr = reinterpret_cast<uint32_t>(hit->indices.data());
+    out.faceRangesPtr = reinterpret_cast<uint32_t>(hit->faceRanges.data());
+    out.faceRangeCount = static_cast<uint32_t>(hit->faceRanges.size() / 2);
     out.linearDeflection = linear;
     out.angularDeflection = angular;
     out.fromCache = true;
@@ -816,10 +996,18 @@ MeshResult tessellate(uint32_t bodyId, const TessellationParams& p) {
 
     for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
       const TopoDS_Face face = TopoDS::Face(exp.Current());
+      const uint32_t rangeStart = static_cast<uint32_t>(mesh.indices.size());
 
       TopLoc_Location loc;
       const Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
       if (tri.IsNull()) {
+        // One range per face VISITED, empty where nothing was emitted.
+        // Recording only the productive faces would shift every later face's
+        // position by one, and a per-face attribute keyed by position would
+        // then land on the wrong face from here to the end of the shape -
+        // silently, and only for shapes containing an untriangulated face.
+        mesh.faceRanges.push_back(rangeStart);
+        mesh.faceRanges.push_back(0);
         continue;
       }
 
@@ -875,6 +1063,34 @@ MeshResult tessellate(uint32_t bodyId, const TessellationParams& p) {
         }
       }
       mesh.triangleCount += static_cast<uint32_t>(nbTris);
+      mesh.faceRanges.push_back(rangeStart);
+      mesh.faceRanges.push_back(static_cast<uint32_t>(mesh.indices.size()) -
+                                rangeStart);
+    }
+
+    // The ranges have to tile the index buffer: contiguous from zero, no gap,
+    // no overlap, ending exactly at the end. Checked rather than asserted in a
+    // comment, because everything downstream reads a per-face attribute by
+    // walking these, and a range that is off by one triangle is a colour on
+    // the wrong face rather than a crash.
+    {
+      uint32_t covered = 0;
+      for (size_t i = 0; i + 1 < mesh.faceRanges.size(); i += 2) {
+        if (mesh.faceRanges[i] != covered) {
+          return fail<MeshResult>(
+              Status::KernelOperationFailed,
+              "face range " + std::to_string(i / 2) + " starts at " +
+                  std::to_string(mesh.faceRanges[i]) + ", expected " +
+                  std::to_string(covered));
+        }
+        covered += mesh.faceRanges[i + 1];
+      }
+      if (covered != mesh.indices.size()) {
+        return fail<MeshResult>(
+            Status::KernelOperationFailed,
+            "face ranges cover " + std::to_string(covered) + " of " +
+                std::to_string(mesh.indices.size()) + " indices");
+      }
     }
 
     if (mesh.vertexCount == 0 || mesh.triangleCount == 0) {
@@ -909,6 +1125,8 @@ MeshResult tessellate(uint32_t bodyId, const TessellationParams& p) {
     out.positionsPtr = reinterpret_cast<uint32_t>(stored->positions.data());
     out.normalsPtr = reinterpret_cast<uint32_t>(stored->normals.data());
     out.indicesPtr = reinterpret_cast<uint32_t>(stored->indices.data());
+    out.faceRangesPtr = reinterpret_cast<uint32_t>(stored->faceRanges.data());
+    out.faceRangeCount = static_cast<uint32_t>(stored->faceRanges.size() / 2);
     return out;
   });
 }
@@ -1241,23 +1459,29 @@ StepImportResult importStepStructured(const StepTranslationOptions& options) {
 
   STEPCAFControl_Reader reader;
 
-  // On: the two things this stage preserves. Off: the four it does not.
+  // On: the three things this stage preserves. Off: the five it does not.
   //
   // Turning the rest off is not an optimization detail, it is what makes the
   // reader-cost comparison honest. Left on, the CAF reader would build layer,
   // property, tolerance and material attributes into a document this stage
   // discards, and the resulting cost would be charged to "reading structure"
-  // in the findings. Colour is read here because group 5 needs it and reading
-  // it twice would cost more than reading it once.
+  // in the findings.
+  //
+  // SHUO mode is on, and group 4 had it off. A specified higher usage
+  // occurrence is not a category this stage drops - it is where an
+  // occurrence's own colour LIVES, because AP214 attaches a per-occurrence
+  // override to one and OCCT reads those only when this is set. Off, a file
+  // whose overrides are written that way would lose every one of them
+  // silently, while the reader looked like it had checked.
   reader.SetNameMode(true);
   reader.SetColorMode(true);
+  reader.SetSHUOMode(true);
   reader.SetLayerMode(false);
   reader.SetPropsMode(false);
   reader.SetGDTMode(false);
   reader.SetMatMode(false);
   reader.SetViewMode(false);
   reader.SetMetaMode(false);
-  reader.SetSHUOMode(false);
 
   STEPControl_Reader& plain = reader.ChangeReader();
   if (!options.shapeProcessing) {
@@ -1319,8 +1543,12 @@ StepImportResult importStepStructured(const StepTranslationOptions& options) {
     }
   }
 
+  const occ::handle<XCAFDoc_ColorTool> colourTool =
+      XCAFDoc_DocumentTool::ColorTool(scratch.get()->Main());
+
   StructureWalk walk;
   walk.out = &out;
+  walk.colourTool = colourTool;
 
   if (anyAssembly) {
     out.structurePresent = true;
@@ -1349,10 +1577,14 @@ StepImportResult importStepStructured(const StepTranslationOptions& options) {
           continue;
         }
         walk.partShapes.push_back(leaf);
+        StepPart part;
         // The label named one thing. When it flattened into several, none of
-        // them is the thing it named, so none of them takes the name.
-        out.partNames.push_back(leaves.size() == 1 ? labelName(root)
-                                                   : std::string());
+        // them is the thing it named, so none of them takes the name. A colour
+        // still can, because a colour on a leaf of a compound is recorded
+        // against that leaf and not against the compound.
+        part.name = leaves.size() == 1 ? labelName(root) : std::string();
+        readPartAppearance(root, leaf, part, out.faceColours);
+        out.parts.push_back(std::move(part));
       }
     }
   }
@@ -1374,9 +1606,12 @@ StepImportResult importStepStructured(const StepTranslationOptions& options) {
 
   for (const StepInstance& node : out.instances) {
     if (!node.name.empty()) ++out.namedInstanceCount;
+    if (node.hasColour) ++out.colouredInstanceCount;
   }
-  for (const std::string& name : out.partNames) {
-    if (!name.empty()) ++out.namedPartCount;
+  for (const StepPart& part : out.parts) {
+    if (!part.name.empty()) ++out.namedPartCount;
+    if (part.hasColour) ++out.colouredPartCount;
+    out.colouredFaceCount += part.colouredFaceCount;
   }
 
   return out;

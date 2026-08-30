@@ -283,11 +283,75 @@ stays reviewable and the word "part" means one thing for the rest of the stage.
 
 ## 5. Appearance extraction (C++)
 
-- [ ] 5.1 Read shape-level colour through `XCAFDoc_ColorTool` for each part and each component, keeping them distinct: the instance override is what makes one occurrence recolourable, and a reader that resolves it before we see it would erase the distinction. Confirm which of the two OCCT actually exposes — this is an open question in the design, and the answer belongs in the findings.
-- [ ] 5.2 Read per-face colour into an array indexed by the part shape's `TopExp_Explorer(TopAbs_FACE)` order, paired with the face count it was built against. Same order as the mesher's loop at `native/src/kernel.cpp:449` — one order, documented in one place, used by both.
-- [ ] 5.3 Emit face ranges from the mesher: `(indexOffset, indexCount)` per face in visitation order, alongside the existing buffers. Assert they tile the index buffer without gap or overlap and that their count equals the reported face count.
-- [ ] 5.4 Cross colour to the boundary as plain triples plus ranges. No face index, no face handle, no identity — `appearance-attributes` fences this explicitly, and the fence is only real if the C++ surface has nothing to hand over.
-- [ ] 5.5 Drop a part's face-colour map whenever its topology changes, in the kernel, at the point the new shape replaces the old — not by convention in a caller. Report the drop so the layer above can say which part lost what.
+- [x] 5.1 Read shape-level colour through `XCAFDoc_ColorTool` for each part and each component, keeping them distinct: the instance override is what makes one occurrence recolourable, and a reader that resolves it before we see it would erase the distinction. Confirm which of the two OCCT actually exposes — this is an open question in the design, and the answer belongs in the findings.
+- [ ] 5.1a **Deferred, with a reason and a plan (found in 5.1).** An occurrence-level colour override still cannot be verified end to end. AP214 expresses it as a `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM`, OCCT routes that into a SHUO rather than onto the component label, and a hand-authored one parses without producing an instance colour — with no way from outside the library to tell whether the authoring or the reader is at fault. No local fixture contains one (`OVER_RIDING` appears in none of them, including all four published AS1 variants). Settle it in group 6 by writing a document with an instance colour through `STEPCAFControl_Writer` and re-importing it: if OCCT's own writer and reader cannot round-trip one between them, that answers the design's open question better than more hand-authoring would.
+- [x] 5.2 Read per-face colour into an array indexed by the part shape's `TopExp_Explorer(TopAbs_FACE)` order, paired with the face count it was built against. Same order as the mesher's loop at `native/src/kernel.cpp:449` — one order, documented in one place, used by both.
+- [x] 5.3 Emit face ranges from the mesher: `(indexOffset, indexCount)` per face in visitation order, alongside the existing buffers. Assert they tile the index buffer without gap or overlap and that their count equals the reported face count.
+- [x] 5.4 Cross colour to the boundary as plain triples plus ranges. No face index, no face handle, no identity — `appearance-attributes` fences this explicitly, and the fence is only real if the C++ surface has nothing to hand over.
+- [x] 5.5 Drop a part's face-colour map whenever its topology changes, in the kernel, at the point the new shape replaces the old — not by convention in a caller. Report the drop so the layer above can say which part lost what.
+
+### Notes from group 5, for the findings document
+
+- **The design's open question is answered, and the answer has a trap in it.**
+  XCAF does keep a part's colour and an occurrence's override apart — but by two
+  different mechanisms, and the public accessor for the second one *resolves*.
+  `XCAFDoc_ColorTool::GetInstanceColor` falls back to the component label and
+  then to the referenced part's own colour when it finds no override, so asking
+  it "does this occurrence have its own colour" answers yes for every occurrence
+  of a coloured part. Measured, not feared: both occurrences of the blue bracket
+  came back blue, and the distinction the two fields exist to keep was gone. The
+  kernel now reads the SHUO directly — `FindComponent`, `FindSHUO`, then the
+  colour off the SHUO's own label — which is the first half of
+  `GetInstanceColor` without the fallbacks. Absent means absent.
+- **A STEP colour is sRGB and OCCT stores it linear.**
+  `STEPConstruct_Styles::DecodeColor` decodes `COLOUR_RGB` with
+  `Quantity_TOC_sRGB` and `Quantity_Color` holds it converted, so
+  `Quantity_Color::Red()` returns 0.0331 for a file that said 0.2. Everything
+  downstream wants the file's number: the document stores it, the renderer
+  treats colours as sRGB, and OCCT's own writer re-encodes as sRGB on the way
+  out. So the kernel reads through `Values(..., Quantity_TOC_sRGB)`, and the
+  fixture check is exact — [0.2, 0.4, 0.8] against a linear reading of
+  ~[0.0331, 0.1329, 0.6038], which is not a rounding difference but a different
+  colour.
+- **Group 4's "SHUO mode off" was too broad and is corrected.** It was switched
+  off with the other four categories this stage drops. A specified higher usage
+  occurrence is not a dropped category — it is where an occurrence's own colour
+  lives — so a file whose overrides are written that way would have lost every
+  one of them while the reader looked like it had checked. Now on.
+- **Colour arrives intact on both fixtures.** The hand-authored file: part
+  [0.2, 0.4, 0.8] exact, one face [0.9, 0.6, 0.1] exact, at exploration index 1
+  of 6. The third-party assembly: all five parts coloured, exact primaries, and
+  no face colours (it has none). Zero false-positive occurrence colours on
+  either, which is the check that matters now that the resolving accessor is out
+  of the picture.
+- **Face-colour blocks are dense within a part and absent between them.** One
+  entry per face in exploration order, so the position is the key and no face
+  index crosses the boundary — but the block is emitted only for a part that has
+  at least one face colour. Most parts in most files have none, and a thousand
+  empty entries each would cost more than the colours do. `colouredFaceCount`
+  zero means there is no block.
+- **Face ranges tile exactly, and the mesh cache serves them.** Six faces, ranges
+  `[0,6, 6,6, 12,6, 18,6, 24,6, 30,6]` covering all 36 indices with no gap and
+  no overlap, verified in the kernel rather than asserted in a comment — a range
+  off by one triangle is a colour on the wrong face, not a crash. A cache hit
+  returns the same `faceRangesPtr`, so the ranges are not silently absent on the
+  second tessellation of a body.
+- **Task 5.5's premise does not hold, and that is the finding.** It asks for the
+  face-colour map to be dropped "at the point the new shape replaces the old".
+  There is no such point: bodies are immutable here and every operation mints a
+  new handle, so an edited body simply has no map and no API can attach an old
+  one to it. Verified rather than argued — a cut on the imported part produced
+  handle 5 from handle 3 with 6 faces becoming 7. What the kernel contributes is
+  the checksum, `StepPart::faceCount`, which catches a caller that tries to
+  carry a map across. It is a checksum and not a proof: an edit that rearranges
+  topology without changing the count would pass it, and the structural
+  guarantee is the one doing the real work.
+- **The checksum check caught its own first draft.** The drilling cylinder was
+  positioned at the occurrence's world coordinates rather than the part's own,
+  so it missed entirely, the Boolean returned its input, and the face count did
+  not move — a passing shape with a failing check. Worth stating because it is
+  the same confusion the parent-relative placements invite: a part shape is
+  unplaced, and everything about where it *appears* lives in the tree.
 
 ## 6. Export with structure (C++)
 
