@@ -9,8 +9,8 @@
 // A behavioral difference between backends that this suite does not cover is a
 // gap in the suite, not an acceptable difference.
 
-import type { DocumentParts, PartName } from '../../src/document/types.ts';
-import { PART_NAMES } from '../../src/document/types.ts';
+import type { DocumentSections, SectionName } from '../../src/document/types.ts';
+import { SECTION_NAMES } from '../../src/document/types.ts';
 import { DocumentNotFoundError, StorageQuotaError } from '../../src/storage/errors.ts';
 import type { DocumentStore, DocumentSummaryInput } from '../../src/storage/types.ts';
 
@@ -34,7 +34,7 @@ function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-function makeParts(seed: string, geometryBytes = 512): DocumentParts {
+function makeSections(seed: string, geometryBytes = 512): DocumentSections {
   const geometry = new Uint8Array(geometryBytes);
   for (let i = 0; i < geometry.length; i++) geometry[i] = (i + seed.length) & 0xff;
   const encoder = new TextEncoder();
@@ -50,22 +50,25 @@ function summaryFor(documentId: string, name: string): DocumentSummaryInput {
 }
 
 /**
- * Parts whose Nth member throws when read.
+ * Sections whose Nth member throws when read.
  *
  * A production seam for fault injection would be worse than this: the store
- * reads `parts[name]` one at a time, so a throwing getter fails it exactly
+ * reads `sections[name]` one at a time, so a throwing getter fails it exactly
  * where a real failure would, through the real code path, with nothing added to
  * `src/` for the benefit of a test.
  */
-function partsFailingAt(parts: DocumentParts, failAt: PartName): DocumentParts {
-  const out: Record<string, unknown> = { ...parts };
+function sectionsFailingAt(
+  sections: DocumentSections,
+  failAt: SectionName,
+): DocumentSections {
+  const out: Record<string, unknown> = { ...sections };
   Object.defineProperty(out, failAt, {
     enumerable: true,
     get(): never {
       throw new Error(`simulated failure while reading ${failAt}`);
     },
   });
-  return out as unknown as DocumentParts;
+  return out as unknown as DocumentSections;
 }
 
 /** Removes every document, so a re-run starts from a known state. */
@@ -83,22 +86,22 @@ const CHECKS: Check[] = [
   {
     name: 'a saved document reads back byte-identical',
     async run(store) {
-      const parts = makeParts('alpha');
-      await store.save(summaryFor('doc-a', 'Alpha'), parts);
+      const sections = makeSections('alpha');
+      await store.save(summaryFor('doc-a', 'Alpha'), sections);
 
       const read = await store.read('doc-a');
-      for (const partName of PART_NAMES) {
+      for (const sectionName of SECTION_NAMES) {
         assert(
-          equalBytes(read[partName], parts[partName]),
-          `${partName} came back different`,
+          equalBytes(read[sectionName], sections[sectionName]),
+          `${sectionName} came back different`,
         );
       }
     },
   },
   {
-    name: 'listing reports the document without returning any part bytes',
+    name: 'listing reports the document without returning any section bytes',
     async run(store) {
-      await store.save(summaryFor('doc-a', 'Alpha'), makeParts('alpha', 4096));
+      await store.save(summaryFor('doc-a', 'Alpha'), makeSections('alpha', 4096));
 
       const listed = await store.list();
       assert(listed.length === 1, `expected 1 document, got ${listed.length}`);
@@ -106,7 +109,7 @@ const CHECKS: Check[] = [
       const [summary] = listed;
       assert(summary !== undefined, 'no summary');
       assert(summary.name === 'Alpha', `name was ${summary.name}`);
-      assert(summary.byteLength > 4096, 'byteLength should cover every part');
+      assert(summary.byteLength > 4096, 'byteLength should cover every section');
       assert(
         Object.keys(summary).sort().join(',') ===
           'byteLength,documentId,modifiedAt,name',
@@ -117,8 +120,8 @@ const CHECKS: Check[] = [
   {
     name: 'saving twice replaces rather than duplicates',
     async run(store) {
-      await store.save(summaryFor('doc-a', 'First'), makeParts('first'));
-      await store.save(summaryFor('doc-a', 'Second'), makeParts('second'));
+      await store.save(summaryFor('doc-a', 'First'), makeSections('first'));
+      await store.save(summaryFor('doc-a', 'Second'), makeSections('second'));
 
       const listed = await store.list();
       assert(listed.length === 1, `expected 1 document, got ${listed.length}`);
@@ -126,7 +129,7 @@ const CHECKS: Check[] = [
 
       const read = await store.read('doc-a');
       assert(
-        equalBytes(read['geometry.brep'], makeParts('second')['geometry.brep']),
+        equalBytes(read['geometry.brep'], makeSections('second')['geometry.brep']),
         'the geometry is from the earlier save',
       );
     },
@@ -134,15 +137,15 @@ const CHECKS: Check[] = [
   {
     name: 'several documents coexist',
     async run(store) {
-      await store.save(summaryFor('doc-a', 'Alpha'), makeParts('alpha'));
-      await store.save(summaryFor('doc-b', 'Beta'), makeParts('beta'));
+      await store.save(summaryFor('doc-a', 'Alpha'), makeSections('alpha'));
+      await store.save(summaryFor('doc-b', 'Beta'), makeSections('beta'));
 
       const ids = (await store.list()).map((s) => s.documentId).sort();
       assert(ids.join(',') === 'doc-a,doc-b', `got ${ids.join(',')}`);
       assert(
         equalBytes(
           (await store.read('doc-b'))['geometry.brep'],
-          makeParts('beta')['geometry.brep'],
+          makeSections('beta')['geometry.brep'],
         ),
         'documents must not bleed into each other',
       );
@@ -164,9 +167,9 @@ const CHECKS: Check[] = [
     },
   },
   {
-    name: 'deletion removes every part',
+    name: 'deletion removes every section',
     async run(store) {
-      await store.save(summaryFor('doc-a', 'Alpha'), makeParts('alpha'));
+      await store.save(summaryFor('doc-a', 'Alpha'), makeSections('alpha'));
       await store.remove('doc-a');
 
       assert((await store.list()).length === 0, 'still listed after deletion');
@@ -196,7 +199,7 @@ const CHECKS: Check[] = [
   {
     name: 'deleting the last-opened document clears the pointer',
     async run(store) {
-      await store.save(summaryFor('doc-a', 'Alpha'), makeParts('alpha'));
+      await store.save(summaryFor('doc-a', 'Alpha'), makeSections('alpha'));
       await store.setLastOpened('doc-a');
       await store.remove('doc-a');
 
@@ -217,14 +220,14 @@ const CHECKS: Check[] = [
   {
     name: 'an interrupted overwrite leaves the previous document intact',
     async run(store) {
-      const original = makeParts('original');
+      const original = makeSections('original');
       await store.save(summaryFor('doc-a', 'Original'), original);
 
       let failed = false;
       try {
         await store.save(
           summaryFor('doc-a', 'Doomed'),
-          partsFailingAt(makeParts('doomed'), 'geometry.brep'),
+          sectionsFailingAt(makeSections('doomed'), 'geometry.brep'),
         );
       } catch {
         failed = true;
@@ -239,10 +242,10 @@ const CHECKS: Check[] = [
       );
 
       const read = await store.read('doc-a');
-      for (const partName of PART_NAMES) {
+      for (const sectionName of SECTION_NAMES) {
         assert(
-          equalBytes(read[partName], original[partName]),
-          `${partName} is not what it was before the failed save`,
+          equalBytes(read[sectionName], original[sectionName]),
+          `${sectionName} is not what it was before the failed save`,
         );
       }
     },
@@ -254,7 +257,7 @@ const CHECKS: Check[] = [
       try {
         await store.save(
           summaryFor('doc-new', 'Doomed'),
-          partsFailingAt(makeParts('doomed'), 'geometry.brep'),
+          sectionsFailingAt(makeSections('doomed'), 'geometry.brep'),
         );
       } catch {
         failed = true;
@@ -284,12 +287,12 @@ const CHECKS: Check[] = [
       try {
         await store.save(
           summaryFor('doc-a', 'Doomed'),
-          partsFailingAt(makeParts('doomed'), 'features.json'),
+          sectionsFailingAt(makeSections('doomed'), 'features.json'),
         );
       } catch {
         // expected
       }
-      await store.save(summaryFor('doc-a', 'Fine'), makeParts('fine'));
+      await store.save(summaryFor('doc-a', 'Fine'), makeSections('fine'));
       assert((await store.list())[0]?.name === 'Fine', 'the store did not recover');
     },
   },
@@ -342,7 +345,10 @@ export async function checkQuotaExhaustion(
 
     let caught: unknown;
     try {
-      await store.save(summaryFor('doc-big', 'Too big'), makeParts('big', payloadBytes));
+      await store.save(
+        summaryFor('doc-big', 'Too big'),
+        makeSections('big', payloadBytes),
+      );
     } catch (error) {
       caught = error;
     }

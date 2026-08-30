@@ -1,10 +1,15 @@
-// The native document: a versioned container of named parts.
+// The native document: a versioned container of named sections.
 //
 // The architecture note is explicit that the document format is a container and
 // that B-Rep serialization is one payload within it (note section 3-4). That
 // distinction is load-bearing here: nothing in this file knows what the
-// geometry part contains, and nothing may parse it. The container's job is part
-// names, versions, identity, and integrity.
+// geometry section contains, and nothing may parse it. The container's job is
+// section names, versions, identity, and integrity.
+//
+// "Section" is deliberate, and "part" is deliberately not used for it: a part
+// here means what XCAF, STEP, and every CAD user mean by it - geometry that one
+// or more instances reference. The three files a document is made of are
+// sections, and the stored names are unchanged by the distinction.
 //
 // It is also explicitly NOT STEP. Saving does not pass geometry through an
 // interchange schema. STEP is an import and export concern, and now that both
@@ -36,7 +41,7 @@ export const SCHEMA_VERSION = 2;
 export const MIN_READABLE_SCHEMA_VERSION = 1;
 
 /**
- * Part names, which double as file names for a store that has files.
+ * Section names, which double as file names for a store that has files.
  *
  * Taken from the layout the architecture note recommends. `topology.bin` and
  * `preview.glb` appear there too and are deliberately absent: there is no
@@ -44,18 +49,18 @@ export const MIN_READABLE_SCHEMA_VERSION = 1;
  * mesh would hide re-tessellation from the recovery measurement this stage
  * exists to take.
  */
-export const PART_NAMES = ['manifest.json', 'features.json', 'geometry.brep'] as const;
+export const SECTION_NAMES = ['manifest.json', 'features.json', 'geometry.brep'] as const;
 
-export type PartName = (typeof PART_NAMES)[number];
+export type SectionName = (typeof SECTION_NAMES)[number];
 
 /**
- * A document as bytes: named parts, each readable without parsing the others.
+ * A document as bytes: named sections, each readable without parsing the others.
  *
  * Uniformly bytes so that a store can persist them without knowing which are
  * text and which are binary - an IndexedDB record field and an OPFS file are
  * both just bytes - and so a round trip can be asserted byte-identical.
  */
-export type DocumentParts = Readonly<Record<PartName, Uint8Array>>;
+export type DocumentSections = Readonly<Record<SectionName, Uint8Array>>;
 
 declare const bodyRefBrand: unique symbol;
 

@@ -17,10 +17,10 @@
 // before it returns. It runs in the middle of a verification session that has
 // its own document, and must leave that session exactly as it found it.
 
-import { buildParts, readDocument } from '../../src/document/document.ts';
+import { buildSections, readDocument } from '../../src/document/document.ts';
 import type { DocumentContent } from '../../src/document/document.ts';
 import { bodyRefFor } from '../../src/document/types.ts';
-import type { DocumentParts } from '../../src/document/types.ts';
+import type { DocumentSections } from '../../src/document/types.ts';
 import type { Kernel } from '../../src/kernel/kernel.ts';
 import type { BodyId } from '../../src/kernel/types.ts';
 import { openStore } from '../../src/storage/index.ts';
@@ -60,9 +60,9 @@ export interface BackendSample {
   readonly backend: StorageBackend;
   readonly workload: string;
   readonly bytes: number;
-  /** Writing every part of the document, atomically. */
+  /** Writing every section of the document, atomically. */
   readonly save: Timing;
-  /** Reading every part back out, without interpreting any of them. */
+  /** Reading every section back out, without interpreting any of them. */
   readonly read: Timing;
   /** Read plus validate plus restore into the kernel: what opening costs. */
   readonly open: Timing;
@@ -275,7 +275,7 @@ async function copiesOf(
 
 interface Rung {
   readonly label: string;
-  /** Capture this rung's container parts for the storage comparison. */
+  /** Capture this rung's container sections for the storage comparison. */
   readonly capture?: 'small' | 'large';
   /** Keep the bodies alive after measuring: the stall probe re-saves them. */
   readonly keepAlive?: boolean;
@@ -445,8 +445,8 @@ function contentFor(workload: Workload, documentId: string): DocumentContent {
   };
 }
 
-const partsBytes = (parts: DocumentParts): number =>
-  Object.values(parts).reduce((sum, part) => sum + part.byteLength, 0);
+const sectionsBytes = (sections: DocumentSections): number =>
+  Object.values(sections).reduce((sum, section) => sum + section.byteLength, 0);
 
 /** Deletes anything a previous run left behind, so a re-run starts clean. */
 async function purge(store: DocumentStore): Promise<void> {
@@ -461,9 +461,9 @@ async function measureBackend(
   kernel: Kernel,
   store: DocumentStore,
   workload: string,
-  parts: DocumentParts,
+  sections: DocumentSections,
 ): Promise<BackendSample> {
-  const bytes = partsBytes(parts);
+  const bytes = sectionsBytes(sections);
   const ids = Array.from(
     { length: STORE_ITERATIONS },
     (_, i) => `${DOC_PREFIX}${store.backend}-${workload}-${i}`,
@@ -477,7 +477,7 @@ async function measureBackend(
     if (documentId === undefined) throw new Error('missing document id');
     await store.save(
       { documentId, name: workload, modifiedAt: new Date().toISOString() },
-      parts,
+      sections,
     );
   });
 
@@ -583,11 +583,11 @@ async function measurePersistenceStalls(
     SAVE_BURST,
     async () => {
       for (let i = 0; i < SAVE_BURST; i++) {
-        const parts = await buildParts(kernel, content);
-        bytes = partsBytes(parts);
+        const sections = await buildSections(kernel, content);
+        bytes = sectionsBytes(sections);
         await store.save(
           { documentId, name: workload.label, modifiedAt: new Date().toISOString() },
-          parts,
+          sections,
         );
       }
     },
@@ -606,8 +606,8 @@ async function measurePersistenceStalls(
     async () => {
       const handles: BodyId[] = [];
       for (let i = 0; i < OPEN_BURST; i++) {
-        const parts = await store.read(documentId);
-        const doc = await readDocument(parts, kernel);
+        const sections = await store.read(documentId);
+        const doc = await readDocument(sections, kernel);
         for (const handle of doc.bodies.values()) {
           handles.push(handle);
           await kernel.tessellate(handle, {});
@@ -643,7 +643,10 @@ export async function measureDocumentPersistence(
   const stalls: StallSample[] = [];
   const notes: string[] = [];
 
-  const captured = new Map<'small' | 'large', { workload: Workload; parts: DocumentParts }>();
+  const captured = new Map<
+    'small' | 'large',
+    { workload: Workload; sections: DocumentSections }
+  >();
   let keptAlive: Workload | null = null;
 
   try {
@@ -662,7 +665,10 @@ export async function measureDocumentPersistence(
       if (rung.capture !== undefined) {
         captured.set(rung.capture, {
           workload,
-          parts: await buildParts(kernel, contentFor(workload, `${DOC_PREFIX}source`)),
+          sections: await buildSections(
+            kernel,
+            contentFor(workload, `${DOC_PREFIX}source`),
+          ),
         });
       }
 
@@ -693,8 +699,8 @@ export async function measureDocumentPersistence(
 
       try {
         await purge(store);
-        for (const [size, { parts }] of captured) {
-          storage.push(await measureBackend(kernel, store, size, parts));
+        for (const [size, { sections }] of captured) {
+          storage.push(await measureBackend(kernel, store, size, sections));
         }
         if (keptAlive !== null) {
           stalls.push(...(await measurePersistenceStalls(kernel, store, keptAlive)));
@@ -710,10 +716,10 @@ export async function measureDocumentPersistence(
       keptAlive = null;
     }
 
-    for (const [size, { parts }] of captured) {
+    for (const [size, { sections }] of captured) {
       notes.push(
-        `${size} document: ${partsBytes(parts)} bytes across ` +
-          `${Object.keys(parts).length} parts`,
+        `${size} document: ${sectionsBytes(sections)} bytes across ` +
+          `${Object.keys(sections).length} sections`,
       );
     }
 

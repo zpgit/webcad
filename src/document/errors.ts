@@ -43,15 +43,15 @@ export class UnsupportedSchemaVersionError extends DocumentError {
   }
 }
 
-/** A part is missing, unparseable, or disagrees with the manifest. */
+/** A section is missing, unparseable, or disagrees with the manifest. */
 export class DamagedDocumentError extends DocumentError {
   readonly code = 'DamagedDocument';
 
-  readonly part: string;
+  readonly section: string;
 
-  constructor(part: string, detail: string, options?: { cause?: unknown }) {
-    super(`This document cannot be opened: ${part} ${detail}.`, options);
-    this.part = part;
+  constructor(section: string, detail: string, options?: { cause?: unknown }) {
+    super(`This document cannot be opened: ${section} ${detail}.`, options);
+    this.section = section;
   }
 }
 

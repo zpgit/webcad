@@ -1,7 +1,7 @@
 // Writing a document and reading one back.
 //
 // The order of checks on the way in is deliberate and is the whole safety
-// argument: schema version, then part presence, then integrity, and only then
+// argument: schema version, then section presence, then integrity, and only then
 // are bytes handed to the kernel. A truncated payload must be refused before
 // OCCT sees it, and a version this build cannot read must be refused before its
 // fields are interpreted at all.
@@ -22,13 +22,10 @@ import type {
   ConstructionEntry,
   ConstructionRecord,
   DocumentManifest,
-  DocumentParts,
+  DocumentSections,
+  SectionName,
 } from './types.ts';
-import {
-  MIN_READABLE_SCHEMA_VERSION,
-  PART_NAMES,
-  SCHEMA_VERSION,
-} from './types.ts';
+import { MIN_READABLE_SCHEMA_VERSION, SCHEMA_VERSION } from './types.ts';
 
 /**
  * What the document layer needs from the kernel.
@@ -80,16 +77,16 @@ function encodeJson(value: unknown): Uint8Array {
 }
 
 /**
- * Serializes the session into container parts.
+ * Serializes the session into container sections.
  *
  * `now` is injectable so a test can assert a document's content rather than
  * work around a timestamp.
  */
-export async function buildParts(
+export async function buildSections(
   kernel: DocumentKernel,
   content: DocumentContent,
   options: { readonly now?: () => string } = {},
-): Promise<DocumentParts> {
+): Promise<DocumentSections> {
   const now = options.now ?? ((): string => new Date().toISOString());
 
   const payload = await kernel.serialize(content.bodies.map((body) => body.handle));
@@ -149,8 +146,8 @@ export async function buildParts(
 /**
  * Validates a document and restores its geometry.
  *
- * **Consumes the geometry part.** Restoring transfers the payload into the
- * kernel, so `parts['geometry.brep']` is detached when this returns. The
+ * **Consumes the geometry section.** Restoring transfers the payload into the
+ * kernel, so `sections['geometry.brep']` is detached when this returns. The
  * checksum is taken before that happens, and a caller that needs the bytes
  * afterwards must copy them first.
  *
@@ -159,13 +156,13 @@ export async function buildParts(
  * untouched, because this function never touches it.
  */
 export async function readDocument(
-  parts: Partial<DocumentParts>,
+  sections: Partial<DocumentSections>,
   kernel: DocumentKernel,
 ): Promise<OpenedDocument> {
   const warnings: string[] = [];
 
-  const manifest = parseManifest(requirePart(parts, 'manifest.json'));
-  const geometry = requirePart(parts, 'geometry.brep');
+  const manifest = parseManifest(requireSection(sections, 'manifest.json'));
+  const geometry = requireSection(sections, 'geometry.brep');
 
   // Integrity before the kernel, always. Handing OCCT a truncated stream is
   // how a damaged document becomes a crash instead of a message.
@@ -185,8 +182,8 @@ export async function readDocument(
   }
 
   // Inert metadata must never be able to cost a user their geometry, so this is
-  // the one part whose failure is a warning rather than a refusal.
-  const record = readRecord(parts['features.json'], warnings);
+  // the one section whose failure is a warning rather than a refusal.
+  const record = readRecord(sections['features.json'], warnings);
 
   if (manifest.kernel.occtVersion !== kernel.occtVersion) {
     warnings.push(
@@ -229,24 +226,27 @@ export async function readDocument(
 
 // --- Parsing -----------------------------------------------------------------
 
-function requirePart(parts: Partial<DocumentParts>, name: (typeof PART_NAMES)[number]): Uint8Array {
-  const part = parts[name];
-  if (part === undefined) {
+function requireSection(
+  sections: Partial<DocumentSections>,
+  name: SectionName,
+): Uint8Array {
+  const section = sections[name];
+  if (section === undefined) {
     throw new DamagedDocumentError(name, 'is missing');
   }
-  return part;
+  return section;
 }
 
-function parseJson(part: Uint8Array, name: string): unknown {
+function parseJson(section: Uint8Array, name: string): unknown {
   try {
-    return JSON.parse(decoder.decode(part));
+    return JSON.parse(decoder.decode(section));
   } catch (cause) {
     throw new DamagedDocumentError(name, 'could not be parsed', { cause });
   }
 }
 
-function parseManifest(part: Uint8Array): DocumentManifest {
-  const raw = parseJson(part, 'manifest.json');
+function parseManifest(section: Uint8Array): DocumentManifest {
+  const raw = parseJson(section, 'manifest.json');
   if (!isRecord(raw)) {
     throw new DamagedDocumentError('manifest.json', 'is not an object');
   }
@@ -339,15 +339,15 @@ function readSources(
  * for metadata nothing reads.
  */
 function readRecord(
-  part: Uint8Array | undefined,
+  section: Uint8Array | undefined,
   warnings: string[],
 ): ConstructionRecord | null {
-  if (part === undefined) {
+  if (section === undefined) {
     warnings.push('This document has no construction record.');
     return null;
   }
   try {
-    const raw = JSON.parse(decoder.decode(part)) as unknown;
+    const raw = JSON.parse(decoder.decode(section)) as unknown;
     if (!isRecord(raw) || !Array.isArray(raw['entries'])) {
       throw new Error('no entry list');
     }

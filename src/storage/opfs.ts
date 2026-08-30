@@ -20,8 +20,8 @@
 // The cost is storing each document twice. That is real, it is bounded at 2x,
 // and it buys atomicity without depending on a rename primitive.
 
-import type { DocumentParts, PartName } from '../document/types.ts';
-import { PART_NAMES } from '../document/types.ts';
+import type { DocumentSections, SectionName } from '../document/types.ts';
+import { SECTION_NAMES } from '../document/types.ts';
 import {
   DocumentNotFoundError,
   StorageQuotaError,
@@ -119,7 +119,7 @@ export class OpfsStore implements DocumentStore {
     }
   }
 
-  async save(summary: DocumentSummaryInput, parts: DocumentParts): Promise<void> {
+  async save(summary: DocumentSummaryInput, sections: DocumentSections): Promise<void> {
     const documents = await this.#documents(true);
     const dir = await documents.getDirectoryHandle(summary.documentId, {
       create: true,
@@ -136,12 +136,12 @@ export class OpfsStore implements DocumentStore {
 
     try {
       let byteLength = 0;
-      for (const partName of PART_NAMES) {
-        // One part read at a time, so a source that fails partway leaves this
+      for (const sectionName of SECTION_NAMES) {
+        // One section read at a time, so a source that fails partway leaves this
         // generation without its summary and therefore uncommitted.
-        const bytes = parts[partName];
+        const bytes = sections[sectionName];
         byteLength += bytes.byteLength;
-        await writeFile(generation, partName, bytes);
+        await writeFile(generation, sectionName, bytes);
       }
 
       // The commit. Until this file exists and parses, this generation does not
@@ -157,7 +157,7 @@ export class OpfsStore implements DocumentStore {
     }
   }
 
-  async read(documentId: string): Promise<DocumentParts> {
+  async read(documentId: string): Promise<DocumentSections> {
     const documents = await this.#documents(false);
     if (documents === null) throw new DocumentNotFoundError(documentId);
 
@@ -173,12 +173,12 @@ export class OpfsStore implements DocumentStore {
     if (current === null) throw new DocumentNotFoundError(documentId);
 
     const generation = await dir.getDirectoryHandle(current.generation);
-    const parts: Partial<Record<PartName, Uint8Array>> = {};
-    for (const partName of PART_NAMES) {
-      const bytes = await readFile(generation, partName);
-      if (bytes !== null) parts[partName] = bytes;
+    const sections: Partial<Record<SectionName, Uint8Array>> = {};
+    for (const sectionName of SECTION_NAMES) {
+      const bytes = await readFile(generation, sectionName);
+      if (bytes !== null) sections[sectionName] = bytes;
     }
-    return parts as DocumentParts;
+    return sections as DocumentSections;
   }
 
   async list(): Promise<readonly DocumentSummary[]> {

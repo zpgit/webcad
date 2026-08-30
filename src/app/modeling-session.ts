@@ -1,4 +1,4 @@
-import { buildParts, readDocument } from '../document/document.ts';
+import { buildSections, readDocument } from '../document/document.ts';
 import type { OpenedDocument } from '../document/document.ts';
 import { DocumentDraft } from '../document/draft.ts';
 import type { BodyRef } from '../document/types.ts';
@@ -271,18 +271,18 @@ export class ModelingSession {
     // One timestamp for both the manifest and the listing, so the two cannot
     // disagree about when this document was written.
     const modifiedAt = new Date().toISOString();
-    const parts = await buildParts(this.#kernel, this.#draft.content(), {
+    const sections = await buildSections(this.#kernel, this.#draft.content(), {
       now: () => modifiedAt,
     });
 
     await store.save(
       { documentId: this.#draft.documentId, name: this.#draft.name, modifiedAt },
-      parts,
+      sections,
     );
     await store.setLastOpened(this.#draft.documentId);
 
-    const byteLength = Object.values(parts).reduce(
-      (sum, part) => sum + part.byteLength,
+    const byteLength = Object.values(sections).reduce(
+      (sum, section) => sum + section.byteLength,
       0,
     );
     this.#emit({ kind: 'saved', name: this.#draft.name, byteLength });
@@ -305,11 +305,11 @@ export class ModelingSession {
   async open(documentId: string): Promise<OpenedDocument> {
     const store = this.#requireStore('open');
 
-    const parts = await timePhase(RECOVERY_PHASES.documentRead, () =>
+    const sections = await timePhase(RECOVERY_PHASES.documentRead, () =>
       store.read(documentId),
     );
     const opened = await timePhase(RECOVERY_PHASES.geometryRestore, () =>
-      readDocument(parts, this.#kernel),
+      readDocument(sections, this.#kernel),
     );
 
     await this.#clear();

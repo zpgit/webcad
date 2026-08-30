@@ -138,9 +138,53 @@ only meaningful before any XCAF symbol becomes reachable.
 Mechanical, byte-contract-neutral, and landed before the schema work so its diff
 stays reviewable and the word "part" means one thing for the rest of the stage.
 
-- [ ] 3.1 Rename `PART_NAMES` → `SECTION_NAMES`, `PartName` → `SectionName`, `DocumentParts` → `DocumentSections` in `src/document/types.ts`, and follow the compiler through `src/document/document.ts`, `src/storage/{types,indexeddb,opfs}.ts`, and the three test files that use them. The stored names — `manifest.json`, `features.json`, `geometry.brep` — do not change.
-- [ ] 3.2 Update the prose that used the old word: the doc comment at `src/document/types.ts:38-46`, and any comment in `src/storage/` that calls a section a part.
-- [ ] 3.3 Prove the rename changed no bytes: the storage conformance round trip already asserts byte-identical sections, so run `npm run verify:storage` and confirm a document written before the rename still opens.
+- [x] 3.1 Rename `PART_NAMES` → `SECTION_NAMES`, `PartName` → `SectionName`, `DocumentParts` → `DocumentSections` in `src/document/types.ts`, and follow the compiler through `src/document/document.ts`, `src/storage/{types,indexeddb,opfs}.ts`, and the three test files that use them. The stored names — `manifest.json`, `features.json`, `geometry.brep` — do not change.
+- [x] 3.2 Update the prose that used the old word: the doc comment at `src/document/types.ts:38-46`, and any comment in `src/storage/` that calls a section a part.
+- [x] 3.3 Prove the rename changed no bytes: the storage conformance round trip already asserts byte-identical sections, so run `npm run verify:storage` and confirm a document written before the rename still opens.
+
+### Notes from group 3, for the findings document
+
+- **The rename went wider than the three identifiers.** `buildParts` →
+  `buildSections`, `requirePart` → `requireSection`, `DamagedDocumentError.part`
+  → `.section`, and every local `parts`/`partName` in `src/document` and
+  `src/storage`. Leaving those would have kept the word ambiguous in exactly the
+  files this stage is about to add a *part* to, which is the whole point of doing
+  it. Three uses of "part" survive on purpose: plain English at
+  `src/document/types.ts:155` ("as part of the transfer") and
+  `src/storage/opfs.ts:38` ("the parts of the File System Access API"), and the
+  assembly sense already present at `src/app/modeling-session.ts:111,412`.
+- **Two strings could not move, and they are IndexedDB's.** The object store is
+  named `'parts'` and the compound key path is `['documentId', 'partName']`
+  (`src/storage/indexeddb.ts`). Both are on-disk contract, and changing either
+  needs a `DB_VERSION` bump and a migration pass to buy nothing but a tidier
+  key. The TypeScript around them says section; the two literals stay, and say
+  why.
+- **A `SECTION_NAME_KEY` constant was added and then removed, because it was a
+  decoy.** It looked like a single source of truth for the key-path field but is
+  only read by `createObjectStore`, which runs on `onupgradeneeded` alone. A
+  database created by an older build keeps the key path it was created with no
+  matter what the constant later says, and the `put` and the read reference the
+  field by name anyway. Three places have to agree and no constant can make them;
+  the literal is inlined and the comment states the constraint instead.
+- **"No bytes changed" was measured twice, both against a worktree of the
+  pre-rename commit rather than against a description of it.** (a) The same draft
+  through the old `buildParts` and the new `buildSections`, same fixed clock,
+  same fake kernel: `manifest.json` 383 bytes, `features.json` 545,
+  `geometry.brep` 6, all three byte-identical. (b) In one browser page, the old
+  store writes a document and the new store reads it back — byte-identical
+  sections, correct listing, and the last-opened pointer intact — on IndexedDB and
+  on OPFS. Both probes were scratch and are deleted.
+- **The layout probe was checked for vacuity and half of it failed the check.**
+  Renaming `SECTIONS_STORE` from `'parts'` made it fail loudly, as it should. But
+  renaming the key-path constant did *not*, and that is what exposed the decoy
+  above: the new code never runs `createObjectStore` against a database the old
+  code already created. Worth stating because it is the general shape of the trap
+  — an IndexedDB schema constant is unreachable on precisely the upgrade path a
+  compatibility test exercises.
+- **Cost: 11 files, no behaviour change, and the suite is where it was** — 146
+  tests passing, storage conformance passing on both backends with the same
+  single pre-existing skip (Chrome does not enforce the IndexedDB quota
+  override).
 
 ## 4. Structure-aware import (C++)
 

@@ -204,7 +204,7 @@ export class DocumentDraft {
     }));
   }
 
-  /** A snapshot for `buildParts`. */
+  /** A snapshot for `buildSections`. */
   content(): DocumentContent {
     return {
       documentId: this.documentId,

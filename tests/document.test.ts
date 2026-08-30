@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import test, { afterEach } from 'node:test';
 
-import { buildParts, readDocument } from '../src/document/document.ts';
+import { buildSections, readDocument } from '../src/document/document.ts';
 import type { DocumentKernel } from '../src/document/document.ts';
 import { DocumentDraft } from '../src/document/draft.ts';
 import {
@@ -19,7 +19,11 @@ import {
   GeometryRestoreError,
   UnsupportedSchemaVersionError,
 } from '../src/document/errors.ts';
-import type { DocumentManifest, DocumentParts, PartName } from '../src/document/types.ts';
+import type {
+  DocumentManifest,
+  DocumentSections,
+  SectionName,
+} from '../src/document/types.ts';
 import { asBodyRef, SCHEMA_VERSION } from '../src/document/types.ts';
 import type { BodyId } from '../src/kernel/types.ts';
 import { asBodyId } from '../src/kernel/types.ts';
@@ -88,39 +92,42 @@ function draftWithHistory(): DocumentDraft {
   return draft;
 }
 
-function manifestOf(parts: Partial<DocumentParts>): DocumentManifest {
-  const part = parts['manifest.json'];
-  assert.ok(part !== undefined);
-  return JSON.parse(new TextDecoder().decode(part)) as DocumentManifest;
+function manifestOf(sections: Partial<DocumentSections>): DocumentManifest {
+  const section = sections['manifest.json'];
+  assert.ok(section !== undefined);
+  return JSON.parse(new TextDecoder().decode(section)) as DocumentManifest;
 }
 
 /** Rewrites the manifest, so a test can corrupt exactly one field. */
 function withManifest(
-  parts: DocumentParts,
+  sections: DocumentSections,
   edit: (manifest: Record<string, unknown>) => void,
-): DocumentParts {
-  const manifest = manifestOf(parts) as unknown as Record<string, unknown>;
+): DocumentSections {
+  const manifest = manifestOf(sections) as unknown as Record<string, unknown>;
   edit(manifest);
   return {
-    ...parts,
+    ...sections,
     'manifest.json': new TextEncoder().encode(JSON.stringify(manifest, null, 2)),
   };
 }
 
-function without(parts: DocumentParts, name: PartName): Partial<DocumentParts> {
-  const copy: Partial<DocumentParts> = { ...parts };
+function without(
+  sections: DocumentSections,
+  name: SectionName,
+): Partial<DocumentSections> {
+  const copy: Partial<DocumentSections> = { ...sections };
   delete copy[name];
   return copy;
 }
 
 // --- Round trip ---------------------------------------------------------------
 
-test('a document round trips through its parts', async () => {
+test('a document round trips through its sections', async () => {
   const kernel = new FakeKernel();
   const draft = draftWithHistory();
 
-  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
-  const opened = await readDocument(parts, kernel);
+  const sections = await buildSections(kernel, draft.content(), { now: FIXED_CLOCK });
+  const opened = await readDocument(sections, kernel);
 
   assert.equal(opened.manifest.schemaVersion, SCHEMA_VERSION);
   assert.equal(opened.manifest.name, 'Bracket');
@@ -137,8 +144,8 @@ test('the construction record survives intact', async () => {
   const kernel = new FakeKernel();
   const draft = draftWithHistory();
 
-  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
-  const opened = await readDocument(parts, kernel);
+  const sections = await buildSections(kernel, draft.content(), { now: FIXED_CLOCK });
+  const opened = await readDocument(sections, kernel);
 
   assert.deepEqual(opened.record?.entries, [
     { op: 'createBox', produces: 'b1', params: { width: 60, depth: 40, height: 25 } },
@@ -157,12 +164,12 @@ test('the construction record survives intact', async () => {
  */
 test('opening restores rather than replays', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content(), {
+  const sections = await buildSections(kernel, draftWithHistory().content(), {
     now: FIXED_CLOCK,
   });
 
   kernel.restoreCalls = 0;
-  await readDocument(parts, kernel);
+  await readDocument(sections, kernel);
 
   assert.equal(kernel.restoreCalls, 1, 'one restoration, no re-creation');
 });
@@ -171,8 +178,8 @@ test('saving an unchanged session twice produces equivalent documents', async ()
   const kernel = new FakeKernel();
   const content = draftWithHistory().content();
 
-  const first = await buildParts(kernel, content);
-  const second = await buildParts(kernel, content);
+  const first = await buildSections(kernel, content);
+  const second = await buildSections(kernel, content);
 
   assert.deepEqual(second['features.json'], first['features.json']);
   assert.deepEqual(second['geometry.brep'], first['geometry.brep']);
@@ -190,8 +197,8 @@ test('an empty document round trips', async () => {
   const kernel = new FakeKernel();
   const draft = DocumentDraft.create('Empty', { documentId: 'doc-empty' });
 
-  const parts = await buildParts(kernel, draft.content());
-  const opened = await readDocument(parts, kernel);
+  const sections = await buildSections(kernel, draft.content());
+  const opened = await readDocument(sections, kernel);
 
   assert.equal(opened.bodies.size, 0);
   assert.deepEqual(opened.record?.entries, []);
@@ -205,8 +212,8 @@ test('identities are stable across save and open', async () => {
   draft.recordBox(asBodyId(1), { width: 1, depth: 1, height: 1 });
   draft.recordCylinder(asBodyId(2), { radius: 1, height: 1 });
 
-  const parts = await buildParts(kernel, draft.content());
-  const opened = await readDocument(parts, kernel);
+  const sections = await buildSections(kernel, draft.content());
+  const opened = await readDocument(sections, kernel);
 
   assert.deepEqual([...opened.bodies.keys()], ['b1', 'b2']);
   // Handles are new; the identities are not.
@@ -228,7 +235,7 @@ test('a deleted identity is not reissued after reopening', async () => {
   draft.recordRelease(first);
 
   const opened = await readDocument(
-    await buildParts(kernel, draft.content()),
+    await buildSections(kernel, draft.content()),
     kernel,
   );
   const reopened = DocumentDraft.fromOpened(opened);
@@ -257,8 +264,8 @@ test('a fresh draft mints a unique document id', () => {
 
 test('a reopened draft keeps its identity and history', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
-  const reopened = DocumentDraft.fromOpened(await readDocument(parts, kernel));
+  const sections = await buildSections(kernel, draftWithHistory().content());
+  const reopened = DocumentDraft.fromOpened(await readDocument(sections, kernel));
 
   assert.equal(reopened.documentId, 'doc-1');
   assert.equal(reopened.name, 'Bracket');
@@ -270,10 +277,10 @@ test('a reopened draft keeps its identity and history', async () => {
 
 test('a truncated checkpoint is refused before the kernel sees it', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
-  const damaged: DocumentParts = {
-    ...parts,
-    'geometry.brep': parts['geometry.brep'].slice(0, 4),
+  const sections = await buildSections(kernel, draftWithHistory().content());
+  const damaged: DocumentSections = {
+    ...sections,
+    'geometry.brep': sections['geometry.brep'].slice(0, 4),
   };
 
   kernel.restoreCalls = 0;
@@ -283,15 +290,15 @@ test('a truncated checkpoint is refused before the kernel sees it', async () => 
 
 test('a corrupted checkpoint fails its checksum', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
+  const sections = await buildSections(kernel, draftWithHistory().content());
 
   // Same length, one byte different: only the checksum can catch this.
-  const bytes = Uint8Array.from(parts['geometry.brep']);
+  const bytes = Uint8Array.from(sections['geometry.brep']);
   bytes[bytes.length - 1] = (bytes[bytes.length - 1] ?? 0) ^ 0xff;
 
   kernel.restoreCalls = 0;
   await assert.rejects(
-    () => readDocument({ ...parts, 'geometry.brep': bytes }, kernel),
+    () => readDocument({ ...sections, 'geometry.brep': bytes }, kernel),
     (error: unknown) =>
       error instanceof DamagedDocumentError && /checksum/.test(error.message),
   );
@@ -300,11 +307,11 @@ test('a corrupted checkpoint fails its checksum', async () => {
 
 test('a checkpoint that disagrees with the manifest is refused, and its bodies released', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
+  const sections = await buildSections(kernel, draftWithHistory().content());
 
   // The manifest declares one body; the payload yields three.
   kernel.restoreCount = 3;
-  await assert.rejects(() => readDocument(parts, kernel), DamagedDocumentError);
+  await assert.rejects(() => readDocument(sections, kernel), DamagedDocumentError);
 
   assert.equal(
     kernel.released.length,
@@ -313,13 +320,13 @@ test('a checkpoint that disagrees with the manifest is refused, and its bodies r
   );
 });
 
-test('a missing part is refused by name', async () => {
+test('a missing section is refused by name', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
+  const sections = await buildSections(kernel, draftWithHistory().content());
 
   for (const name of ['manifest.json', 'geometry.brep'] as const) {
     await assert.rejects(
-      () => readDocument(without(parts, name), kernel),
+      () => readDocument(without(sections, name), kernel),
       (error: unknown) =>
         error instanceof DamagedDocumentError && error.message.includes(name),
     );
@@ -328,12 +335,12 @@ test('a missing part is refused by name', async () => {
 
 test('a manifest that is not JSON is refused', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
+  const sections = await buildSections(kernel, draftWithHistory().content());
 
   await assert.rejects(
     () =>
       readDocument(
-        { ...parts, 'manifest.json': new TextEncoder().encode('{ not json') },
+        { ...sections, 'manifest.json': new TextEncoder().encode('{ not json') },
         kernel,
       ),
     DamagedDocumentError,
@@ -342,8 +349,8 @@ test('a manifest that is not JSON is refused', async () => {
 
 test('a manifest missing a required field is refused', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
-  const damaged = withManifest(parts, (manifest) => {
+  const sections = await buildSections(kernel, draftWithHistory().content());
+  const damaged = withManifest(sections, (manifest) => {
     delete manifest['nextBodyOrdinal'];
   });
 
@@ -354,8 +361,8 @@ test('a manifest missing a required field is refused', async () => {
 
 test('a document from a newer schema is refused, naming both versions', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
-  const future = withManifest(parts, (manifest) => {
+  const sections = await buildSections(kernel, draftWithHistory().content());
+  const future = withManifest(sections, (manifest) => {
     manifest['schemaVersion'] = SCHEMA_VERSION + 1;
   });
 
@@ -379,8 +386,8 @@ test('a document from a newer schema is refused, naming both versions', async ()
  */
 test('an unknown schema version wins over a malformed manifest', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
-  const future = withManifest(parts, (manifest) => {
+  const sections = await buildSections(kernel, draftWithHistory().content());
+  const future = withManifest(sections, (manifest) => {
     manifest['schemaVersion'] = 99;
     delete manifest['bodies'];
     delete manifest['geometry'];
@@ -397,10 +404,10 @@ test('an unknown schema version wins over a malformed manifest', async () => {
  */
 test('a different OCCT version is a warning, not a refusal', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
+  const sections = await buildSections(kernel, draftWithHistory().content());
 
   kernel.occtVersion = '8.1.0';
-  const opened = await readDocument(parts, kernel);
+  const opened = await readDocument(sections, kernel);
 
   assert.equal(opened.bodies.size, 1, 'the document still opens');
   assert.equal(opened.warnings.length, 1);
@@ -409,13 +416,13 @@ test('a different OCCT version is a warning, not a refusal', async () => {
 
 test('a restore failure names both OCCT versions', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
+  const sections = await buildSections(kernel, draftWithHistory().content());
 
   kernel.occtVersion = '9.0.0';
   kernel.failRestore = true;
 
   await assert.rejects(
-    () => readDocument(parts, kernel),
+    () => readDocument(sections, kernel),
     (error: unknown) => {
       assert.ok(error instanceof GeometryRestoreError);
       assert.equal(error.writtenBy, '8.0.1');
@@ -436,10 +443,10 @@ test('a restore failure names both OCCT versions', async () => {
  */
 test('an unreadable construction record costs metadata, not geometry', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
+  const sections = await buildSections(kernel, draftWithHistory().content());
 
   const opened = await readDocument(
-    { ...parts, 'features.json': new TextEncoder().encode('{{{') },
+    { ...sections, 'features.json': new TextEncoder().encode('{{{') },
     kernel,
   );
 
@@ -450,9 +457,9 @@ test('an unreadable construction record costs metadata, not geometry', async () 
 
 test('a missing construction record is a warning', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content());
+  const sections = await buildSections(kernel, draftWithHistory().content());
 
-  const opened = await readDocument(without(parts, 'features.json'), kernel);
+  const opened = await readDocument(without(sections, 'features.json'), kernel);
 
   assert.equal(opened.bodies.size, 1);
   assert.equal(opened.record, null);
@@ -480,8 +487,8 @@ test('a real document round trips with exact geometry', { skip }, async () => {
   const before = await kernel.bodyInfo(outcome.bodyId);
   const beforeFaces = await kernel.faceTypeSummary(outcome.bodyId);
 
-  const parts = await buildParts(kernel, draft.content());
-  const opened = await readDocument(parts, kernel);
+  const sections = await buildSections(kernel, draft.content());
+  const opened = await readDocument(sections, kernel);
 
   // One body survives the releases: the Boolean's result.
   const surviving = draft.bodies;
@@ -501,25 +508,25 @@ test('a real document round trips with exact geometry', { skip }, async () => {
 });
 
 /**
- * Reading a document consumes its geometry part.
+ * Reading a document consumes its geometry section.
  *
  * Restoring transfers the payload into the kernel, so the caller's copy is
  * detached afterwards. Asserted rather than merely documented: a store that
- * cached the parts it handed over would find them hollow on the second read,
+ * cached the sections it handed over would find them hollow on the second read,
  * and the failure would surface far from here.
  */
-test('reading a document detaches its geometry part', { skip }, async () => {
+test('reading a document detaches its geometry section', { skip }, async () => {
   const kernel = await makeKernel();
   const body = await kernel.createBox({ width: 10, depth: 10, height: 10 });
 
   const draft = DocumentDraft.create('One', { documentId: 'real-2' });
   draft.recordBox(body, { width: 10, depth: 10, height: 10 });
 
-  const parts = await buildParts(kernel, draft.content());
-  assert.ok(parts['geometry.brep'].byteLength > 0);
+  const sections = await buildSections(kernel, draft.content());
+  assert.ok(sections['geometry.brep'].byteLength > 0);
 
-  await readDocument(parts, kernel);
-  assert.equal(parts['geometry.brep'].byteLength, 0);
+  await readDocument(sections, kernel);
+  assert.equal(sections['geometry.brep'].byteLength, 0);
 });
 
 // --- Provenance ---------------------------------------------------------------
@@ -541,8 +548,8 @@ test('an imported body keeps its provenance across a round trip', async () => {
   });
   assert.equal(refs.length, 2);
 
-  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
-  const manifest = manifestOf(parts);
+  const sections = await buildSections(kernel, draft.content(), { now: FIXED_CLOCK });
+  const manifest = manifestOf(sections);
 
   // The document's own unit is untouched by an import declaring another one:
   // conversion happened at the translation boundary, so by the time geometry
@@ -556,7 +563,7 @@ test('an imported body keeps its provenance across a round trip', async () => {
   assert.equal(source.fileName, 'bracket.step');
   assert.equal(source.declaredUnit, 'in', 'the file\'s own unit is kept as provenance');
 
-  const opened = await readDocument(parts, kernel);
+  const opened = await readDocument(sections, kernel);
   const reopened = DocumentDraft.fromOpened(opened);
   assert.deepEqual(reopened.sourceOf(refs[0]!), {
     kind: 'imported',
@@ -579,8 +586,8 @@ test('an import entry round trips, naming every body it produced', async () => {
   const tool = draft.recordCylinder(asBodyId(23), { radius: 4, height: 20 });
   draft.recordBoolean('subtract', imported[0]!, tool, asBodyId(24));
 
-  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
-  const opened = await readDocument(parts, kernel);
+  const sections = await buildSections(kernel, draft.content(), { now: FIXED_CLOCK });
+  const opened = await readDocument(sections, kernel);
   assert.ok(opened.record !== null);
 
   const entries = opened.record.entries;
@@ -600,13 +607,13 @@ test('an import entry round trips, naming every body it produced', async () => {
 
 test('an authored-only document writes no sources at all', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content(), {
+  const sections = await buildSections(kernel, draftWithHistory().content(), {
     now: FIXED_CLOCK,
   });
 
   // Absence is the representation of "authored here". Writing an explicit
   // `authored` entry per body would bloat every document to say nothing.
-  assert.equal(manifestOf(parts).sources, undefined);
+  assert.equal(manifestOf(sections).sources, undefined);
 });
 
 test('provenance for a released body is not persisted', async () => {
@@ -618,9 +625,9 @@ test('provenance for a released body is not persisted', async () => {
   });
   draft.recordRelease(refs[0]!);
 
-  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
+  const sections = await buildSections(kernel, draft.content(), { now: FIXED_CLOCK });
   assert.equal(
-    manifestOf(parts).sources,
+    manifestOf(sections).sources,
     undefined,
     'a document must not claim provenance for geometry it no longer holds',
   );
@@ -636,11 +643,11 @@ test('provenance for a released body is not persisted', async () => {
  */
 test('a version 1 document opens, its bodies reading as authored', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content(), {
+  const sections = await buildSections(kernel, draftWithHistory().content(), {
     now: FIXED_CLOCK,
   });
 
-  const legacy = withManifest(parts, (manifest) => {
+  const legacy = withManifest(sections, (manifest) => {
     manifest['schemaVersion'] = 1;
     delete manifest['sources'];
   });
@@ -660,10 +667,10 @@ test('a version 1 document opens, its bodies reading as authored', async () => {
 
 test('a document from the future is still refused', async () => {
   const kernel = new FakeKernel();
-  const parts = await buildParts(kernel, draftWithHistory().content(), {
+  const sections = await buildSections(kernel, draftWithHistory().content(), {
     now: FIXED_CLOCK,
   });
-  const future = withManifest(parts, (manifest) => {
+  const future = withManifest(sections, (manifest) => {
     manifest['schemaVersion'] = SCHEMA_VERSION + 1;
   });
 
@@ -678,8 +685,8 @@ test('an unreadable source entry reads as authored rather than failing', async (
   const draft = DocumentDraft.create('Half-written', { documentId: 'doc-junk' });
   draft.recordImport([asBodyId(41)], { fileName: 'x.step', declaredUnit: 'mm' });
 
-  const parts = await buildParts(kernel, draft.content(), { now: FIXED_CLOCK });
-  const damaged = withManifest(parts, (manifest) => {
+  const sections = await buildSections(kernel, draft.content(), { now: FIXED_CLOCK });
+  const damaged = withManifest(sections, (manifest) => {
     manifest['sources'] = { b1: { kind: 'imported', format: 'step' } };
   });
 
