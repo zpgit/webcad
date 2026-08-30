@@ -12,6 +12,7 @@
     "test": "node --experimental-strip-types --test tests/**/*.test.ts",
     "test:watch": "node --experimental-strip-types --test --watch tests/**/*.test.ts",
     "kernel:fetch": "bash scripts/fetch-occt.sh",
+    "fixtures:fetch": "bash scripts/fetch-step-fixtures.sh",
     "kernel:hello": "bash scripts/build-hello.sh",
     "kernel:build": "bash scripts/build-kernel.sh",
     "verify:browser": "node scripts/verify-browser.mjs",

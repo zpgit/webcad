@@ -16,6 +16,15 @@ if [ -d "$OCCT_DIR/.git" ]; then
   rm -rf "$OCCT_DIR"
 fi
 
+# The directory can exist without being a checkout: fetch-step-fixtures.sh
+# writes two files into $OCCT_DIR/data/step so the STEP suites have inputs
+# without a 313 MB clone. git clone refuses a non-empty target, so clear it -
+# everything the fixture fetch put there arrives again with the clone.
+if [ -d "$OCCT_DIR" ]; then
+  warn "$OCCT_DIR is not an OCCT checkout - replacing its contents with the clone"
+  rm -rf "$OCCT_DIR"
+fi
+
 log "cloning OCCT ${WEBCAD_OCCT_VERSION} (shallow) into $OCCT_DIR"
 git clone --depth 1 --branch "${WEBCAD_OCCT_VERSION}" "${WEBCAD_OCCT_REPO}" "$OCCT_DIR"
 

@@ -320,6 +320,8 @@ npm run verify:browser:webgl
 npm run verify:dist
 ```
 
-The STEP fixtures come from `npm run kernel:fetch` and are gitignored. Without
-them the translation tests and the browser measurement report themselves as not
-run, rather than passing — the numbers above are the only record.
+The STEP fixtures come from `npm run fixtures:fetch` — two files at the pinned
+OCCT tag, hash-checked — or from the full source clone `npm run kernel:fetch`
+does. Either way they are gitignored. Without them the translation tests and the
+browser measurement report themselves as not run, rather than passing — the
+numbers above are the only record.

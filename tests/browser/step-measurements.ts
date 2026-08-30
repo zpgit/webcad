@@ -147,7 +147,7 @@ const FIXTURES: readonly { name: string; url: string }[] = [
  * Fetches a fixture through the dev server.
  *
  * A failed fetch is a missing fixture, not a broken measurement: the path is
- * gitignored, so a checkout that has not run `npm run kernel:fetch` simply does
+ * gitignored, so a checkout that has not run `npm run fixtures:fetch` simply does
  * not have it. Returning null lets the caller report that rather than throw.
  */
 async function fetchFixture(url: string): Promise<Uint8Array | null> {
@@ -578,7 +578,7 @@ export async function measureStepRoundTrip(
         fixture: fixture.name,
         reason:
           `could not be fetched from ${fixture.url} - OCCT test data is ` +
-          'gitignored; run `npm run kernel:fetch`',
+          'gitignored; run `npm run fixtures:fetch`',
       });
       continue;
     }

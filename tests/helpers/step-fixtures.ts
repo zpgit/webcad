@@ -1,8 +1,9 @@
 // Locating the STEP files these tests translate.
 //
 // The fixtures are OCCT's own test data under `third_party/occt/`, which is
-// gitignored: it arrives via `npm run kernel:fetch` and is never committed. So a
-// suite here cannot assume its inputs exist, and the interesting question is
+// gitignored: it arrives via `npm run fixtures:fetch` (two files) or as part of
+// the full source clone `npm run kernel:fetch` does, and is never committed. So
+// a suite here cannot assume its inputs exist, and the interesting question is
 // what it does when they do not.
 //
 // It skips, loudly, naming the fixture and how to get it. Not passes: a suite
@@ -28,9 +29,13 @@ export const STEP_FIXTURE_DIR = 'third_party/occt/data/step';
 /**
  * The two fixtures available locally, smallest first.
  *
- * `screw` is a single part; `linkrods` is an assembly, which is what makes it
- * worth having - it exercises the flattening path and the dropped-structure
- * report, not just a bigger file.
+ * Both are single parts. `linkrods` sounds like an assembly and is 1.79 MB, but
+ * it holds one MANIFOLD_SOLID_BREP under one SHAPE_REPRESENTATION with no
+ * NEXT_ASSEMBLY_USAGE_OCCURRENCE anywhere; the word "Assembly" in it is the
+ * MECHANICAL_CONTEXT discipline string. Neither carries a COLOUR_RGB either.
+ * They differ in size and surface mix, not in structure - so nothing here
+ * exercises assembly structure, part naming or colour, and OCCT's repository
+ * ships no third-party STEP file that would.
  */
 export const STEP_FIXTURES = {
   screw: `${STEP_FIXTURE_DIR}/screw.step`,
@@ -51,7 +56,7 @@ export function hasStepFixture(name: StepFixtureName): boolean {
 export function stepFixtureSkip(name: StepFixtureName): string | false {
   return hasStepFixture(name)
     ? false
-    : `missing ${STEP_FIXTURES[name]} - run \`npm run kernel:fetch\` ` +
+    : `missing ${STEP_FIXTURES[name]} - run \`npm run fixtures:fetch\` ` +
         '(OCCT test data is gitignored and not committed)';
 }
 

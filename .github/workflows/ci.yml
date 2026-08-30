@@ -78,6 +78,14 @@ jobs:
       - name: Build kernel facade
         run: bash scripts/build-kernel.sh --facade-only
 
+      # Unconditional, unlike the OCCT source fetch above. The STEP fixtures are
+      # OCCT test data inside that gitignored source tree, so an install-tree
+      # cache hit skipped the clone and left the STEP suites with nothing to
+      # read: they skipped themselves and the run stayed green having exercised
+      # only the leg where we read a file we wrote ourselves. Two files, ~1.9 MB.
+      - name: Fetch STEP fixtures
+        run: bash scripts/fetch-step-fixtures.sh
+
       - name: Typecheck
         run: npm run typecheck
 

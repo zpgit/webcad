@@ -48,6 +48,14 @@ bash scripts/install-emsdk.sh
 bash scripts/fetch-occt.sh
 ```
 
+The clone also brings in the two STEP fixtures the translation suites read, at
+`third_party/occt/data/step/`. If you have a built kernel but no source tree —
+which happens whenever the install tree came from a cache — fetch just those:
+
+```bash
+npm run fixtures:fetch   # two files, ~1.9 MB, hash-checked against the pinned tag
+```
+
 Before touching OCCT, confirm the toolchain itself works:
 
 ```bash
@@ -68,8 +76,11 @@ Two stages:
 
 1. **OCCT static libraries** — slow (tens of minutes), built once per pinned OCCT
    version. Only `FoundationClasses`, `ModelingData`, and `ModelingAlgorithms`
-   are enabled; `DataExchange` (STEP), `Visualization`, `Draw`, and
-   `ApplicationFramework` are all off. STEP arrives in MVP-2.
+   are enabled as modules; `DataExchange`, `Visualization`, `Draw`, and
+   `ApplicationFramework` stay off. STEP arrives as a single named toolkit
+   instead — `BUILD_ADDITIONAL_TOOLKITS=TKDESTEP`, whose dependency closure OCCT
+   resolves itself — so the build gets STEP without also getting IGES, glTF,
+   OBJ, PLY, VRML and STL.
 2. **The facade module** — seconds. Rebuilt whenever `native/src` changes.
 
 Useful flags:
@@ -108,7 +119,8 @@ loudly at the smoke-test stage rather than mysteriously later.
 
 ```bash
 npm run typecheck
-npm test                      # 114 tests; kernel tests skip if unbuilt
+npm test                      # 140 tests; kernel tests skip if unbuilt,
+                              # STEP tests skip without `npm run fixtures:fetch`
 npm run verify:browser        # drives the real app in Chrome (WebGPU)
 npm run verify:browser:webgl  # same, forcing the WebGL2 fallback
 npm run verify:storage        # storage conformance against real IndexedDB and OPFS
