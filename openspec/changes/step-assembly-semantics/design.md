@@ -105,9 +105,16 @@ carry it losslessly in both directions. The document stores them; three.js gets 
 
 *Alternative considered: translation + quaternion (+ scale).* Rejected: it is
 lossy for a `gp_Trsf` that is not a pure rigid motion, and every conversion is a
-chance to lose handedness. STEP files from real systems contain mirrored
-placements; a decomposition that quietly drops a reflection would be a fidelity
-bug that looks like a rendering bug.
+chance to lose handedness.
+
+Worth being precise about where a non-rigid transform actually comes from,
+because the first draft of this decision was vague about it. An occurrence placed
+through product structure cannot be one: the format places a child through a
+transformation between two axis placements, both right-handed by construction, so
+no assembly occurrence can express a reflection. Reflections and scales arrive by
+the other route — a mapped item carrying a general Cartesian transformation
+operator — and `gp_Trsf` represents those, mirror forms included. So the loss the
+twelve numbers prevent is real, just not where it was first claimed to be.
 
 ### "Part" means the assembly sense; the container's parts become sections
 
@@ -233,6 +240,26 @@ vertex blocks mean no vertex has to belong to two colours.
 The kernel additionally emits **face ranges** — `(indexOffset, indexCount)` per
 face, in the same order — because the viewport needs them to paint colours and
 the measurement needs them to count coloured faces. A range is not a name.
+
+### The writer's assembly mode is set explicitly, never inherited
+
+Measured, not assumed (task 2.3): OCCT's STEP writer turns **any** multi-body
+export into an assembly. One body writes a single flat product; two bodies write
+a root product plus one child per body, with names it invents
+("Open CASCADE STEP translator 8.0 2.1"). Re-importing our own two-body export
+reports two occurrences that nothing in this system asked for.
+
+So "a flat session exports flat" is not a property this code has today, and it
+cannot be obtained by leaving the writer alone — the fabrication *is* the library
+default. The assembly mode is therefore a parameter this stage sets on every
+export: off when there is no structure to write, on when there is.
+
+This also corrects a scenario MVP-2 shipped, which asserted that export writes
+"no fabricated part names, colours, or assembly structure"
+(`openspec/specs/step-translation/spec.md:162`). It was untrue for any export of
+more than one body, and no test caught it because the round-trip tests asserted
+geometry fidelity rather than the entity census. The replacement requirement in
+`assembly-structure` names the mechanism instead of restating the wish.
 
 ### A pick resolves to a node, and an edit on a shared part says so
 

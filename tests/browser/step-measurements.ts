@@ -141,6 +141,12 @@ export interface StepMeasurements {
 const FIXTURES: readonly { name: string; url: string }[] = [
   { name: 'screw.step', url: '/third_party/occt/data/step/screw.step' },
   { name: 'linkrods.step', url: '/third_party/occt/data/step/linkrods.step' },
+  // An assembly, which the two above are not: both are single parts. The first
+  // is committed and hand-authored, so it is always available; the second is a
+  // real assembly from another CAD system, pinned but hosted elsewhere, so it
+  // may be absent and is reported as such rather than quietly omitted.
+  { name: 'assembly.step', url: '/tests/fixtures/assembly.step' },
+  { name: 'as1-md-214.stp', url: '/third_party/step-fixtures/as1-md-214.stp' },
 ];
 
 /**

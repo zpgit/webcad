@@ -1,10 +1,15 @@
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { FRAME_BUDGET_MS } from '../src/ui/measurements.ts';
-import { closeTo, kernelSkip, makeKernel } from './helpers/kernel.ts';
+import { closeTo, disposeKernels, kernelSkip, makeKernel } from './helpers/kernel.ts';
 
 const skip = kernelSkip;
+
+// A kernel holds a WASM module, and nothing collects it while the module object
+// is reachable. Released between tests rather than at exit: accumulating them
+// is how a file stops working, silently, once it crosses the line.
+afterEach(disposeKernels);
 
 /**
  * The MVP-0 loop, end to end: create, operate, tessellate, and hand mesh data to

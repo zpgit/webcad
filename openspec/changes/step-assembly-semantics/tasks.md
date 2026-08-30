@@ -58,13 +58,80 @@ only meaningful before any XCAF symbol becomes reachable.
 
 ## 2. Fixtures, before the code that needs them
 
-- [ ] 2.1 Hand-author `tests/fixtures/assembly.step` — AP214, committed, minimal and asserted against exactly: two instances of one part with different placements (one of them mirrored, to exercise the no-decomposition rule), one grouping node with no shape of its own, a part-level `COLOUR_RGB`, an instance-level colour override, and one face colour. Keep it small enough to read in full.
-- [ ] 2.2 Write down what the file contains, in the fixture helper next to it, as counts a test can assert: parts, instances, depth, named entities, coloured faces. A hand-authored fixture whose contents are described only by the file itself is a test that asserts what it happens to parse.
-- [ ] 2.3 Verify the hand-authored file is actually valid STEP that a foreign reader accepts, not just one ours does — otherwise it proves nothing about the reader either. If no third-party reader is available, say so here and treat the file as an assertion vehicle only.
-- [ ] 2.4 Find a third-party STEP assembly with colours, permissively licensed, small enough to fetch in CI. Record the licence and the source alongside the pin. If none can be found, stop and record that: the interoperability claim is then reported as not exercised, and `assembly-structure`'s measurement requirement already says so.
-- [ ] 2.5 Extend `scripts/fetch-step-fixtures.sh` to a second pinned source: it currently derives one raw base from `WEBCAD_OCCT_REPO` and the pinned tag, so generalize the fixture table to carry a URL per entry rather than a shared base, keeping the sha256 check and the hard failure on mismatch.
-- [ ] 2.6 Teach `tests/helpers/step-fixtures.ts` about both new fixtures — the committed one always present, the pinned one skipping loudly when absent — and correct the comment block that now describes only OCCT's two single-part files.
-- [ ] 2.7 Add the new fixture to `tests/browser/step-measurements.ts`'s fixture list and to the CI fetch step's expectations, so the browser measurement covers an assembly rather than two single parts.
+- [x] 2.1 Hand-author `tests/fixtures/assembly.step` — AP214, committed, minimal and asserted against exactly: two instances of one part with different placements (one of them mirrored, to exercise the no-decomposition rule), one grouping node with no shape of its own, a part-level `COLOUR_RGB`, an instance-level colour override, and one face colour. Keep it small enough to read in full.
+- [x] 2.2 Write down what the file contains, in the fixture helper next to it, as counts a test can assert: parts, instances, depth, named entities, coloured faces. A hand-authored fixture whose contents are described only by the file itself is a test that asserts what it happens to parse.
+- [x] 2.3 Verify the hand-authored file is actually valid STEP that a foreign reader accepts, not just one ours does — otherwise it proves nothing about the reader either. If no third-party reader is available, say so here and treat the file as an assertion vehicle only.
+- [x] 2.1a **Not anticipated, twice over.** (a) The instance-level colour override is *not* in the hand-authored file. It is expressible — AP214 has `OVER_RIDING_STYLED_ITEM` — but nothing in this repository can read a colour back yet, so authoring one now would commit entities no test can check. Added in group 5 against a reader that can verify it. (b) A mirrored occurrence turned out not to be expressible at all through product structure: a `NEXT_ASSEMBLY_USAGE_OCCURRENCE` places its child through an `ITEM_DEFINED_TRANSFORMATION` between two `AXIS2_PLACEMENT_3D`, both right-handed by construction. The fixture uses an exact 3-4-5 rotation instead, and the placement requirement's rationale was corrected to name where a reflection actually comes from.
+- [x] 2.4 Find a third-party STEP assembly with colours, permissively licensed, small enough to fetch in CI. Record the licence and the source alongside the pin. If none can be found, stop and record that: the interoperability claim is then reported as not exercised, and `assembly-structure`'s measurement requirement already says so.
+- [x] 2.5 Extend `scripts/fetch-step-fixtures.sh` to a second pinned source: it currently derives one raw base from `WEBCAD_OCCT_REPO` and the pinned tag, so generalize the fixture table to carry a URL per entry rather than a shared base, keeping the sha256 check and the hard failure on mismatch.
+- [x] 2.6 Teach `tests/helpers/step-fixtures.ts` about both new fixtures — the committed one always present, the pinned one skipping loudly when absent — and correct the comment block that now describes only OCCT's two single-part files.
+- [x] 2.7 Add the new fixture to `tests/browser/step-measurements.ts`'s fixture list and to the CI fetch step's expectations, so the browser measurement covers an assembly rather than two single parts.
+
+### Notes from group 2, for the findings document
+
+- **The hand-authored fixture is `tests/fixtures/assembly.step`**, committed, 542
+  lines: carrier -> cradle -> bracket x2, one part instanced twice, a grouping
+  node with no shape, a part colour and a face colour. Its assembly layer is
+  hand-written entity by entity; its leaf geometry is one 10 mm box from OCCT's
+  own writer, because hand-authoring a manifold solid B-rep risks an invalid
+  closed shell for no gain to what the fixture tests. The deviation from "hand
+  author the whole file" is deliberate and recorded in the helper.
+- **The placements were verified against a prediction, not just parsed.** A
+  structure-blind reader flattens the file into two placed bodies, and their
+  bounding boxes match the hand-computed expectation exactly on all six values,
+  including the cradle's +5 mm Z lift - so placement *composition* is confirmed,
+  not only the leaf transform. The rotation uses a 3-4-5 direction (0.6, 0.8, 0)
+  so every expected coordinate is exact in binary.
+- **A mirrored occurrence is not expressible through product structure at all.**
+  `NEXT_ASSEMBLY_USAGE_OCCURRENCE` places its child through
+  `ITEM_DEFINED_TRANSFORMATION` between two `AXIS2_PLACEMENT_3D`, both
+  right-handed by construction. Reflections reach a reader by another route - a
+  mapped item carrying a `CARTESIAN_TRANSFORMATION_OPERATOR_3D` - which is not an
+  occurrence. The placement decision still stands (a `gp_Trsf` can be mirrored or
+  scaled) but its stated rationale was wrong about where that comes from, and was
+  corrected in the design and the spec.
+- **Our exporter has been fabricating assemblies all along.** Exporting one body
+  writes a flat product; exporting two writes a root product plus one child per
+  body with invented names ("Open CASCADE STEP translator 8.0 2.1"), because
+  OCCT's writer turns any compound into an assembly by default. That contradicts
+  a scenario MVP-2 shipped, and no test caught it because the round-trip tests
+  asserted geometry rather than the entity census. Pinned by a test now; task
+  6.5a sets the assembly mode explicitly.
+- **The third-party fixture is `as1-md-214.stp`**: the AS1 assembly as written by
+  MicroStation/J through ST-DEVELOPER in 1999, 73 kB, 13 occurrences, 9 named
+  products, 5 RGB colours, 18 bodies when flattened. **The variant matters** - the
+  same assembly is published as written by several systems, and `as1-oc-214.stp`
+  was written by OpenCascade, which is our own writer and would have proved
+  nothing about interoperability. Its licence is not stated; the set is published
+  by STEP Tools for testing STEP implementations, and the file is fetched at test
+  time and never redistributed here. Recorded rather than asserted.
+- **Pins are now required or optional.** OCCT's two are required, because they
+  come over the same transport as the source clone. The third-party one is
+  optional: it lives on someone else's host, and turning their outage into a red
+  build buys nothing, so a failed download warns and the suites skip and report
+  the claim as not exercised. A wrong hash stays fatal either way - unavailable
+  and wrong are different problems. Both paths were exercised.
+- **`npm test` now passes `--no-wasm-async-compilation`, and finding out why cost
+  most of this group.** Adding five tests to the STEP file made it hang - not
+  fail - in 5 of 6 runs. Two plausible diagnoses were both wrong: memory (the box
+  has 225 GB, 40 held-open modules cost 240 MB) and Emscripten's synchronous
+  12 MB `readFileSync` (300 reads at a p99 of 3.3 ms). The real cause is V8's
+  *asynchronous* WASM compilation: the stall is inside Emscripten's `factory()`,
+  the promise never resolves, and the event loop blocks so completely that an
+  unref'd timer never fires while the process burns no CPU. Synchronous
+  compilation: 6 of 6 clean, then 4 more full-suite runs clean, and the suite got
+  *faster* (5.3 s against 7.3 s).
+- **Kernel disposal in tests was added during that investigation and is kept, but
+  it was not the fix.** `makeKernel` now tracks what it hands out and every
+  kernel-using file releases them in an `afterEach`. It is correct hygiene - a
+  kernel holds a 12 MB module plus its heap, and nothing collected them before -
+  and it is not what stopped the hangs. Worth stating plainly so the next reader
+  does not credit it with something it did not do.
+- **Orphaned test processes contaminated the measurements halfway through.**
+  `timeout` kills the runner but not the worker it spawned, so eleven stuck node
+  processes had accumulated and the flake rate appeared to climb. Kill the
+  children, or let node's own `--test-timeout` end the run, before trusting any
+  rate measured here.
 
 ## 3. The parts-to-sections rename, on its own
 
@@ -99,6 +166,7 @@ stays reviewable and the word "part" means one thing for the rest of the stage.
 - [ ] 6.3 Write colours at the levels they were held, and nothing else: no resolved display colour, no fabricated colour for an uncoloured part.
 - [ ] 6.4 Confirm what the writer actually emits — one part definition and N occurrences, or N duplicated parts. This is the design's second open question; measure it by re-importing our own export and counting, and by comparing the entity census against the source file.
 - [ ] 6.5 Keep the flat export path exactly as it is for a session with no structure, including its byte output, so a locally authored model exports as it did before.
+- [ ] 6.5a **Not anticipated (found in task 2.3).** Set the writer's assembly mode explicitly on every export. OCCT fabricates an assembly for *any* multi-body export — a root product plus one child per body with invented names — so "a flat session exports flat" is not something the current code does, and cannot be had by leaving the writer alone. A test pins the current fabrication (`tests/step-translation.test.ts`, "survives our own round trip") and will fail when this lands, which is the point.
 - [ ] 6.6 Verify all of section 4-6 against the raw module before any TypeScript exists, extending the MVP-1/MVP-2 smoke harness: import the hand-authored fixture, census structure and colour, export, re-import, compare, and exercise every failure path for handle leaks and module aborts.
 
 ## 7. Kernel boundary and protocol (TypeScript)

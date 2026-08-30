@@ -30,12 +30,19 @@ The instance tree MUST be acyclic, every parent reference MUST resolve within th
 
 ### Requirement: A placement is a transform, carried without decomposition
 
-A placement SHALL be carried and stored as a 3×4 affine transform — twelve numbers, row-major — matching what the kernel's own transform type holds. It MUST NOT be decomposed into translation, rotation, and scale for storage or for transport, because a decomposition cannot represent every transform a foreign file may contain and a silently dropped reflection is a fidelity loss that presents as a rendering bug.
+A placement SHALL be carried and stored as a 3×4 affine transform — twelve numbers, row-major — matching what the kernel's own transform type holds. It MUST NOT be decomposed into translation, rotation, and scale for storage or for transport.
 
-#### Scenario: A mirrored placement survives
+The reason is what a foreign file can contain. An occurrence placed through the product-structure route carries a rigid, right-handed motion and nothing more, which a decomposition would survive. But a placement reaching the kernel as a general transform — a scale, or a reflection, which the format expresses through a mapped item rather than an occurrence — would not, and a silently dropped reflection is a fidelity loss that presents as a rendering bug. Carrying the transform whole costs twelve numbers and removes the class of defect entirely.
 
-- **WHEN** an assembly containing a mirrored occurrence is imported, checkpointed, reopened, and exported
-- **THEN** the occurrence is still mirrored at every stage, and its handedness is not silently corrected
+#### Scenario: A scaled or reflected transform survives
+
+- **WHEN** geometry placed by a transform that is not a rigid right-handed motion is imported, checkpointed, reopened, and exported
+- **THEN** the transform is the same at every stage, and its scale and handedness are not silently normalized
+
+#### Scenario: A rotated occurrence survives exactly
+
+- **WHEN** an occurrence rotated about an axis is imported, checkpointed, reopened, and exported
+- **THEN** its placement's twelve numbers are unchanged at every stage, compared exactly rather than within a tolerance where the source values are exact
 
 #### Scenario: No decomposition is exposed
 
@@ -146,6 +153,8 @@ Making an occurrence unique SHALL be an explicit operation that produces a new p
 
 Exporting an assembly SHALL write one part definition per part and one occurrence per instance, carrying placements and names. It MUST NOT write a part's geometry once per instance. What the export writes MUST be the current geometry of each part, as for any export.
 
+The translator's assembly mode SHALL be set on every export rather than inherited. This is not a stylistic preference: the underlying library fabricates an assembly for any multi-body export, inventing a root product and a generated name per body, so a session with no structure cannot export flat unless the export says so. An export MUST write structure when the document has structure and MUST NOT when it does not, and in both cases MUST have stated which.
+
 #### Scenario: A round trip preserves the instance count
 
 - **WHEN** an assembly of twenty instances of one part is imported, exported, and re-imported
@@ -155,6 +164,16 @@ Exporting an assembly SHALL write one part definition per part and one occurrenc
 
 - **WHEN** a flat session with no instance tree is exported
 - **THEN** the payload describes its bodies without fabricating a hierarchy, and no grouping nodes or occurrence names appear that the session did not hold
+
+#### Scenario: A multi-body flat export is still flat
+
+- **WHEN** a session of several bodies with no instance tree is exported and re-imported
+- **THEN** the re-import reports no occurrences, rather than one per body with a generated name
+
+#### Scenario: The assembly mode is a stated choice, not a default
+
+- **WHEN** an export is performed
+- **THEN** the translator's assembly mode has been set by this system for that export, and the report says whether structure was written
 
 ### Requirement: The cost of the instanced representation is measured
 

@@ -1,15 +1,21 @@
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { InvalidHandleError, InvalidParameterError } from '../src/kernel/errors.ts';
 import {
   closeTo,
+  disposeKernels,
   kernelSkip,
   makeKernel,
   maxCylindricalDeviation,
 } from './helpers/kernel.ts';
 
 const skip = kernelSkip;
+
+// A kernel holds a WASM module, and nothing collects it while the module object
+// is reachable. Released between tests rather than at exit: accumulating them
+// is how a file stops working, silently, once it crosses the line.
+afterEach(disposeKernels);
 
 test('tessellation produces well-formed buffers', { skip }, async () => {
   const kernel = await makeKernel();

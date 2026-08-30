@@ -8,6 +8,8 @@ export const KERNEL_ARTIFACT = 'src/kernel/wasm/webcad_kernel.mjs';
 /** node:test `skip` reason when the kernel has not been built yet. */
 export const kernelSkip = skipUnlessBuilt(KERNEL_ARTIFACT, 'npm run kernel:build');
 
+const liveKernels: Kernel[] = [];
+
 /**
  * A freshly initialized kernel backed by the built artifact.
  *
@@ -18,11 +20,34 @@ export const kernelSkip = skipUnlessBuilt(KERNEL_ARTIFACT, 'npm run kernel:build
  * `Worker`, and the point is to exercise the same request handler the Worker
  * runs. What this path cannot catch is a serialization bug, which is why
  * `npm run verify:browser` is the authority on the boundary itself.
+ *
+ * Every kernel handed out here is tracked so a file can release them between
+ * tests - see `disposeKernels`. A file that creates many and releases none will
+ * eventually stop working, not gradually get slower.
  */
 export async function makeKernel(): Promise<Kernel> {
-  return Kernel.create({
+  const kernel = await Kernel.create({
     transport: new InProcessTransport(() => loadEmscriptenModule(KERNEL_ARTIFACT)),
   });
+  liveKernels.push(kernel);
+  return kernel;
+}
+
+/**
+ * Releases every kernel `makeKernel` has handed out. Register as `afterEach`.
+ *
+ * Necessary rather than tidy. A kernel holds a WASM module - a 12 MB code image
+ * plus its heap - and nothing collects it while the module object is reachable,
+ * so a file with twenty tests accumulates twenty modules for the life of the
+ * process. That is what this suite did until a file crossed the line and simply
+ * stopped: no error, no crash, just a test that never returned while the
+ * process thrashed. Disposing drops the module reference
+ * (`src/kernel/worker/handler.ts:105`) and lets the memory go.
+ *
+ * Idempotent, and safe for a test that disposed its own kernel.
+ */
+export function disposeKernels(): void {
+  while (liveKernels.length > 0) liveKernels.pop()?.dispose();
 }
 
 /** Relative tolerance comparison for geometric quantities. */
@@ -79,6 +104,31 @@ export function maxCylindricalDeviation(mesh: MeshBuffers, radius: number): numb
     }
   }
   return worst;
+}
+
+/**
+ * The axis-aligned bounds of a tessellated mesh.
+ *
+ * Where a body's placement is the thing under test, this is the observable: the
+ * kernel reports volume and counts but no bounding box, and a mesh's extent is a
+ * direct consequence of the transform that placed it. Tolerant by argument
+ * rather than by default, because a placement authored from exact values should
+ * be asserted exactly.
+ */
+export function meshBounds(mesh: MeshBuffers): {
+  min: [number, number, number];
+  max: [number, number, number];
+} {
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let v = 0; v < mesh.positions.length / 3; v++) {
+    for (let axis = 0; axis < 3; axis++) {
+      const c = mesh.positions[3 * v + axis] ?? 0;
+      if (c < (min[axis] ?? Infinity)) min[axis] = c;
+      if (c > (max[axis] ?? -Infinity)) max[axis] = c;
+    }
+  }
+  return { min, max };
 }
 
 /** Creates a box and a cylinder positioned to drill cleanly through it. */

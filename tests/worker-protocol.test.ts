@@ -5,7 +5,7 @@
 // The geometry suites drive the same handler through `InProcessTransport`.
 
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 
 import {
   InvalidHandleError,
@@ -21,9 +21,14 @@ import {
 import { Kernel } from '../src/kernel/kernel.ts';
 import type { KernelEnvelope, KernelResponse } from '../src/kernel/worker/protocol.ts';
 import { WorkerTransport } from '../src/kernel/worker/worker-transport.ts';
-import { kernelSkip, makeKernel } from './helpers/kernel.ts';
+import { disposeKernels, kernelSkip, makeKernel } from './helpers/kernel.ts';
 
 const skip = kernelSkip;
+
+// A kernel holds a WASM module, and nothing collects it while the module object
+// is reachable. Released between tests rather than at exit: accumulating them
+// is how a file stops working, silently, once it crosses the line.
+afterEach(disposeKernels);
 
 /**
  * A stand-in for the browser's Worker.

@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { Kernel } from '../src/kernel/kernel.ts';
@@ -8,10 +8,15 @@ import {
   WebAssemblyUnsupportedError,
 } from '../src/kernel/errors.ts';
 import { asBodyId } from '../src/kernel/types.ts';
-import { KERNEL_ARTIFACT, kernelSkip, makeKernel } from './helpers/kernel.ts';
+import { KERNEL_ARTIFACT, disposeKernels, kernelSkip, makeKernel } from './helpers/kernel.ts';
 import { loadEmscriptenModule } from './helpers/load-wasm.ts';
 
 const skip = kernelSkip;
+
+// A kernel holds a WASM module, and nothing collects it while the module object
+// is reachable. Released between tests rather than at exit: accumulating them
+// is how a file stops working, silently, once it crosses the line.
+afterEach(disposeKernels);
 
 test('initialization reports the OCCT version', { skip }, async () => {
   const kernel = await makeKernel();

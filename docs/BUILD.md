@@ -164,6 +164,22 @@ person does not rediscover them.
 - **Node 23 is not supported by vitest**, whose engine range excludes odd Node
   releases. The project uses Node's built-in test runner instead, which also
   removes a dependency. Tests run with `--experimental-strip-types`.
+- **Tests pass `--no-wasm-async-compilation`, and it is not cosmetic.** Without
+  it, a test file that instantiates the kernel around twenty times stalls
+  intermittently — 5 of 6 runs, hanging forever rather than failing. The stall is
+  inside Emscripten's `factory()`, in V8's *asynchronous* WASM compilation: the
+  promise never resolves, the event loop blocks so not even an unref'd timer
+  fires, and the process burns no CPU while doing it. Forcing synchronous
+  compilation fixed 6 of 6. It is a V8 flag rather than a Node API, so if a
+  future Node rejects it the failure is loud. Nothing about the browser is
+  affected — there, Emscripten instantiates through `fetch` and a different
+  compilation path, and the app creates one kernel per Worker rather than twenty
+  per process.
+
+  Symptoms worth recognizing, because two plausible explanations were wrong: it
+  is not memory (the box had 207 GB free, and 40 held-open modules cost 240 MB),
+  and it is not the 12 MB `readFileSync` Emscripten uses in Node (300 of those
+  reads ran at a p99 of 3.3 ms).
 - **Node's type stripping rejects TypeScript parameter properties**
   (`constructor(private readonly x)`). The codebase uses explicit field
   declarations instead; keep it that way or tests will fail to parse.

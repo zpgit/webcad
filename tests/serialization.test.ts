@@ -6,7 +6,7 @@
 // restore something shaped roughly right, and still be data loss.
 
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 
 import {
   InvalidHandleError,
@@ -15,9 +15,14 @@ import {
 } from '../src/kernel/errors.ts';
 import type { Kernel } from '../src/kernel/kernel.ts';
 import type { BodyId } from '../src/kernel/types.ts';
-import { boxAndDrill, closeTo, kernelSkip, makeKernel } from './helpers/kernel.ts';
+import { boxAndDrill, closeTo, disposeKernels, kernelSkip, makeKernel } from './helpers/kernel.ts';
 
 const skip = kernelSkip;
+
+// A kernel holds a WASM module, and nothing collects it while the module object
+// is reachable. Released between tests rather than at exit: accumulating them
+// is how a file stops working, silently, once it crosses the line.
+afterEach(disposeKernels);
 
 /** Everything a round trip must preserve, gathered in one call. */
 async function snapshot(kernel: Kernel, bodyId: BodyId): Promise<unknown> {

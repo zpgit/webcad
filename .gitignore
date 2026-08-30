@@ -15,6 +15,7 @@ dist/
 # reproducible build product keyed on pinned tool versions.
 third_party/occt/
 third_party/emsdk/
+third_party/step-fixtures/
 native/build/
 src/kernel/wasm/*.js
 src/kernel/wasm/*.mjs
