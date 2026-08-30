@@ -364,3 +364,68 @@ test('a failed serialization is logged like any other operation', { skip }, asyn
   assert.equal(entry.operation, 'serialize');
   assert.notEqual(entry.status, 0, 'failures are recorded, not silently dropped');
 });
+
+// --- Face order across a checkpoint ------------------------------------------
+
+test(
+  'a checkpoint preserves the order faces are visited in',
+  { skip: kernelSkip },
+  async () => {
+    // Load-bearing and silent when it breaks, which is why it is asserted here
+    // rather than assumed by the code that depends on it.
+    //
+    // Per-face display attributes are keyed by a face's position in OCCT's
+    // `TopExp_Explorer(TopAbs_FACE)` order. If a checkpoint round trip permuted
+    // that order, every such attribute would land on the wrong face after a
+    // restart - and it would look like a rendering bug, not a persistence one.
+    //
+    // The instrument is the mesher, which needs no extra API: it emits each
+    // face's triangulation nodes in visitation order and shares no vertex
+    // between faces (`native/src/kernel.cpp:449`), so the position buffer is
+    // that order made observable. A permutation of faces permutes the blocks.
+    //
+    // Read a failure here as "the order moved", not "the mesh changed": the
+    // sorted comparison below separates those two. If the values match but the
+    // sequence does not, faces were reordered. If the values differ, the
+    // triangulation itself changed and this test cannot say anything about
+    // order - use a per-face fingerprint probe for that.
+    const kernel = await makeKernel();
+    const bodies = [
+      await kernel.createBox({ width: 60, depth: 40, height: 25 }),
+      await drilledBlock(kernel),
+      await kernel.createCylinder({ radius: 8, height: 30 }),
+    ];
+
+    const before = await Promise.all(bodies.map((b) => kernel.tessellate(b)));
+    const payload = await kernel.serialize(bodies);
+    const restored = await kernel.restore(payload.bytes);
+    assert.equal(restored.length, bodies.length);
+
+    for (const [i, body] of restored.entries()) {
+      const expected = before[i]?.mesh;
+      assert.ok(expected !== undefined);
+      const { mesh } = await kernel.tessellate(body);
+
+      assert.equal(mesh.positions.length, expected.positions.length, `body ${i}: vertex count`);
+      const sequenceMatches = mesh.positions.every((v, k) => v === expected.positions[k]);
+
+      if (!sequenceMatches) {
+        const sortedBefore = Array.from(expected.positions).sort();
+        const sortedAfter = Array.from(mesh.positions).sort();
+        const sameValues = sortedAfter.every((v, k) => v === sortedBefore[k]);
+        assert.fail(
+          `body ${i}: mesh differs after a round trip - ${
+            sameValues
+              ? 'same vertices in a different order, so face order was NOT preserved'
+              : 'different vertices, so the triangulation changed and face order is unproven'
+          }`,
+        );
+      }
+
+      assert.ok(
+        mesh.normals.every((v, k) => v === expected.normals[k]),
+        `body ${i}: per-face normals moved even though positions did not`,
+      );
+    }
+  },
+);
